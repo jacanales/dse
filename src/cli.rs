@@ -42,7 +42,12 @@ struct Cli {
     group: Vec<String>,
 
     /// Explicit hosts, comma separated
-    #[arg(short = 'H', long = "hosts", value_name = "HOST[,HOST...]", global = true)]
+    #[arg(
+        short = 'H',
+        long = "hosts",
+        value_name = "HOST[,HOST...]",
+        global = true
+    )]
     hosts: Option<String>,
 
     /// Target every configured group
