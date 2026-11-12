@@ -135,6 +135,13 @@ Para conectar a las máquinas, en lugar de configurar el modo de conexión en la
   three words; the user chose **dse** (Distributed Shell Executor) from
   `dse` / `mos` / `res` / `fos`. Every candidate was checked as free in PATH (and
   the earlier shortlist in crates.io).
+- **L17** (user request) — "Haz los 2. Luego crea el repositorio en Github como
+  repositorio público, añadele un buen README.md con capturas de como funciona
+  la app". Done: config moved to `~/.config/dse/config.toml`, repository published
+  at <https://github.com/jacanales/dse> (public, MIT, topics), README rewritten with
+  three screenshots. Screenshots are real captures of the app in a terminal
+  (`tmux` + a scripted ssh stub with `*.example.net` hosts, so no private hostnames
+  leak), rendered to PNG through Chrome.
 - **L16** (evidence, S12) — Rename applied: crate/binary `dse`, config path
   `~/.config/dse/config.toml`, `$DSE_CONFIG`, all help/hints/messages/docs. The
   pre-rename config (`$DSH_CONFIG`, `~/.config/dsh/config.toml`) is still read when
