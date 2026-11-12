@@ -1,0 +1,4 @@
+/target
+.worktrees
+*.log
+.DS_Store
