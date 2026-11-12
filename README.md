@@ -88,9 +88,29 @@ dsh run -g pve apt update    # one-shot run, prefixed streaming output
 dsh run -H 10.0.0.9,10.0.0.10 uptime
 dsh groups                   # groups and their host counts
 dsh hosts -g pve             # effective user@host:port resolved through ssh -G
+dsh ping -g pve              # does every host answer over ssh?
+dsh ping pve00.jacd.local    # or a single machine
+dsh ping pve dead01          # hosts and group names can be mixed
 ```
 
-Exit code of `dsh run` is `0` only when every host succeeded, `1` otherwise.
+Exit codes of `dsh run` and `dsh ping` are `0` only when every host succeeded
+(or answered), `1` otherwise.
+
+### Checking a fleet: `dsh ping`
+
+```text
+✔ pve00.jacd.local 613 ms
+✔ pve01.jacd.local 466 ms
+✖ pve02.jacd.local exit 255
+✖ dead01.jacd.local timeout after 1.0s
+✖ 2/4 reachable · 2 unreachable
+```
+
+A probe is a full ssh session running `true`, so it validates what dsh actually
+needs: DNS, TCP, host key, key/agent authentication and the remote shell. The
+latency is the whole round trip. `--timeout SECS` (default 10, `0` waits forever)
+bounds a dead host; on expiry the ssh child is killed and reported as a timeout.
+Nothing changes on the remote machines.
 
 ### Keys in the terminal
 
@@ -144,7 +164,8 @@ useful when changing the layout.
 
 - Native ssh multiplexing (`ControlMaster`) or an in-process client to cut
   connection latency on big groups.
-- Per-host timeout and retry policies.
+- Per-host timeout and retry policies for `dsh run` and the TUI (the engine
+  already bounds each host; only `ping` exposes it today).
 - `sudo` prompts, remote file copy, and ordered/rolling execution.
 - Filters over groups (`tag:proxmox`, ssh-config wildcards) instead of flat lists.
 - Persisted history and per-host paging in the detail view.

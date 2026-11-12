@@ -290,6 +290,10 @@ fn glyph_for(state: &HostState, app: &App) -> (String, Style) {
             "!".to_string(),
             Style::new().fg(WARN).add_modifier(Modifier::BOLD),
         ),
+        HostState::TimedOut(_) => (
+            "⏳".to_string(),
+            Style::new().fg(DANGER).add_modifier(Modifier::BOLD),
+        ),
         HostState::Cancelled => ("×".to_string(), Style::new().fg(MUTED)),
     }
 }
@@ -299,7 +303,7 @@ fn status_color(state: &HostState) -> Color {
         HostState::Pending | HostState::Cancelled => MUTED,
         HostState::Running => ACCENT,
         HostState::Succeeded => SUCCESS,
-        HostState::Failed(_) => DANGER,
+        HostState::Failed(_) | HostState::TimedOut(_) => DANGER,
         HostState::Errored(_) => WARN,
     }
 }

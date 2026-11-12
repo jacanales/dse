@@ -72,6 +72,7 @@ impl HostView {
             HostState::Failed(Some(code)) => format!("exit {code}"),
             HostState::Failed(None) => "signal".to_string(),
             HostState::Errored(_) => "error".to_string(),
+            HostState::TimedOut(_) => "timeout".to_string(),
             HostState::Cancelled => "cancelled".to_string(),
         }
     }
@@ -222,6 +223,7 @@ impl App {
             command,
             concurrency: self.concurrency,
             ssh: self.ssh.clone(),
+            timeout: None,
         };
         self.run = Some(crate::exec::spawn_run(spec, events));
         true

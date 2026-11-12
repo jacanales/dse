@@ -11,6 +11,8 @@ PoC scope: runnable end-to-end (config, fan-out engine, live TUI), not polished.
 - **S4** — Rust, using its strengths (async fan-out, no shell glue). Quote: "Quiero que uses rust y la potencia de rust para hacer esto."
 - **S5** — No connection settings inside the app: hosts are plain OpenSSH targets resolved from the user's SSH config (key auth already working). A group is just a list of hosts, e.g. `pve00.jacd.local, pve01.jacd.local, pve02.jacd.local`. Quotes: "en lugar de configurar el modo de conexión en la propia app, aprovecharemos la configuración de ssh", "para crear un grupo de máquinas simplemente tendremos que configurar: "pve00.jacd.local, pve01.jacd.local, pve02.jacd.local" y como ya tengo SSH configurado para conectar por clave a esas máquinas, podrá conectarse".
 - **S6** — First deliverable is an initial PoC, explicitly a base to keep polishing into a fast, modern, easy tool. Quote: "Con esta información crea una PoC inicial y luego la iremos puliendo para tener una herramienta facil de utilizar, rápida y moderna."
+- **S8** — A command that pings a machine or a group to validate reachability before running anything. Quote: "Ahora quiero añadir un comando para enviar fácilmente un ping a una máquina o un grupo de máquinas, que nos servirá para validar si podemos conectar con esas máquinas y/o están activas".
+- **S9** — The probe must terminate: an inactive host may not stall the report. Implementation: `--timeout SECS` (default 10, `0` = unlimited); on expiry the ssh child is killed and the host is reported as a timeout. Derived from S8 ("están activas").
 - **S7** — Borrow feature ideas from pssh/pdsh (parallel execution, per-host output labeling, exit-code summary, non-interactive auth). Quote: "Algunos proyectos similares que hacen esto y de los que puedes coger ideas son: pssh, pdsh."
 
 ### PoC decisions (S5, S6)
@@ -27,6 +29,10 @@ PoC scope: runnable end-to-end (config, fan-out engine, live TUI), not polished.
 - [x] **T4** — *S1, S2, S6* — CLI wiring: `dsh` (TUI), `dsh run`, `dsh groups`, `dsh hosts` (`src/main.rs`, `src/cli.rs`). Commit: `f15b251`.
 - [x] **T5** — *S6* — README with config example and keybindings; `cargo fmt`, `cargo clippy -D warnings`, `cargo test`. Commit: `f86fd8c`.
 
+- [x] **T7** — *S8, S9* (user request L10) — `dsh ping`: a bounded ssh probe per
+  host (hosts, groups or a mix), latency per host, reason on failure. Engine
+  gains an optional per-host timeout and `HostState::TimedOut`. Commit:
+  `feat(cli): add dsh ping`.
 - [x] **T6** — *S6* (user report L7) — `dsh init` writes a starter config and the
   "config not found" error points at it; `dsh groups` reports the file actually
   used. Commit: `feat(cli): add dsh init`.
@@ -81,5 +87,15 @@ Para conectar a las máquinas, en lugar de configurar el modo de conexión en la
   failed fast because `prox00.jacd.local` does not resolve in DNS
   (`exit 255`, reported per host, dsh exit code 1). `prox` came from the README
   example, not from the user's fleet.
-- **L6** (open) — Real-machine verification still needs one successful remote
-  run on the `pve` group, with the user's terminal/keys.
+- **L10** (user request, verbatim) — "Ahora quiero añadir un comando para enviar
+  fácilmente un ping a una máquina o un grupo de máquinas, que nos servirá para
+  validar si podemos conectar con esas máquinas y/o están activas".
+- **L11** (evidence, S8/S9) — `dsh ping -g pve` against the real fleet: 5/5
+  reachable (391–613 ms) and `dsh ping pve00.jacd.local`: 1/1 (187 ms). Stub
+  checks: a host exiting 100 → "exit 100"; a host that never answers →
+  "timeout after 1.0s" and the child is killed, the suite still runs in ~0.6 s.
+  Differential check: `dsh run` output and the rendered TUI screen are unchanged
+  by the engine timeout addition; 49 tests, clippy and fmt clean.
+- **L6** (closed by L11) — Real-machine verification done: `dsh ping` proves ssh
+  connectivity to the whole `pve` group. A successful `dsh run` on the group is
+  still the user's own next step.

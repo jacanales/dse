@@ -15,6 +15,10 @@ use crate::exec::{HostState, RunEvent, RunSpec, RunSummary, Stream, spawn_run};
 use crate::ssh::{self, SshSettings};
 use crate::tui;
 
+/// Default per-host limit for `dsh ping`: long enough for a slow link, short
+/// enough that a dead host does not stall the report.
+const DEFAULT_PING_TIMEOUT_SECS: u64 = 10;
+
 const AFTER_HELP: &str = r#"Hosts are plain ssh targets, so ~/.ssh/config, keys, agent and ProxyJump all apply.
 
 Config: ~/.config/dsh/config.toml (override with --config or $DSH_CONFIG)
@@ -33,6 +37,8 @@ Examples:
   dsh -g pve                   open the terminal on the pve group
   dsh run -g pve apt update    run once and stream prefixed output
   dsh hosts -g pve             show the effective ssh endpoint per host
+  dsh ping -g pve              check every host answers over ssh
+  dsh ping pve00.jacd.local    the same, for a single machine
 "#;
 
 #[derive(Debug, Parser)]
@@ -69,6 +75,15 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Check that hosts are reachable and answer over ssh
+    Ping {
+        /// Hosts or configured group names
+        #[arg(value_name = "HOST|GROUP")]
+        targets: Vec<String>,
+        /// Per-host limit in seconds (0 waits forever)
+        #[arg(long = "timeout", value_name = "SECS", default_value_t = DEFAULT_PING_TIMEOUT_SECS)]
+        timeout: u64,
+    },
     /// Write a starter config.toml and print its path
     Init {
         /// Overwrite an existing config file
@@ -151,8 +166,22 @@ async fn run_inner() -> Result<ExitCode> {
                 command: command.join(" "),
                 concurrency,
                 ssh,
+                timeout: None,
             };
             run_once(spec).await
+        }
+        Some(Command::Ping { timeout, .. }) => {
+            let hosts = ping_targets(&config, &cli)?;
+            let spec = RunSpec {
+                hosts,
+                // Proving an ssh session works is the whole point: the lightest
+                // possible remote command, no output, no side effects.
+                command: "true".to_string(),
+                concurrency,
+                ssh,
+                timeout: (*timeout > 0).then(|| std::time::Duration::from_secs(*timeout)),
+            };
+            ping(spec).await
         }
         Some(Command::Init { .. }) => unreachable!("init is handled before the config is loaded"),
         Some(Command::Tui) | None => {
@@ -315,7 +344,7 @@ async fn run_once(spec: RunSpec) -> Result<ExitCode> {
         .map(|host| host.chars().count())
         .max()
         .unwrap_or(0);
-    let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
+    let color = use_color();
     let (tx, mut rx) = unbounded_channel();
     let handle = spawn_run(spec, tx);
 
@@ -353,12 +382,151 @@ async fn run_once(spec: RunSpec) -> Result<ExitCode> {
     Ok(ExitCode::from(summary.exit_code() as u8))
 }
 
+fn use_color() -> bool {
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// One host of a `dsh ping` report.
+struct PingRow {
+    host: String,
+    state: HostState,
+    elapsed_ms: u128,
+}
+
+/// `dsh ping` accepts either explicit hosts or configured group names, so
+/// `dsh ping pve` and `dsh ping pve00.jacd.local` both work.
+fn ping_targets(config: &Config, cli: &Cli) -> Result<Vec<String>> {
+    let Some(Command::Ping { targets, .. }) = &cli.command else {
+        bail!("internal error: ping_targets called for another command");
+    };
+    if targets.is_empty() {
+        if spec_for(cli).is_none() {
+            bail!("select a host or group to ping, e.g. `dsh ping pve` or `dsh ping -g pve`");
+        }
+        return resolve(config, cli);
+    }
+
+    let mut hosts = Vec::new();
+    for raw in targets {
+        for name in parse_host_list(raw) {
+            if config.groups.contains_key(&name) {
+                let expanded = config
+                    .resolve(&TargetSpec::Groups(vec![name.clone()]))
+                    .with_context(|| format!("group {name:?}"))?;
+                hosts.extend(expanded);
+            } else {
+                hosts.push(name);
+            }
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    hosts.retain(|host| seen.insert(host.clone()));
+    if hosts.is_empty() {
+        bail!("select a host or group to ping");
+    }
+    Ok(hosts)
+}
+
+/// Render the ping table; `false` means at least one host did not answer.
+fn ping_report(rows: &[PingRow], color: bool) -> (Vec<String>, bool) {
+    let host_width = rows
+        .iter()
+        .map(|row| row.host.chars().count())
+        .max()
+        .unwrap_or(0);
+    let details: Vec<String> = rows
+        .iter()
+        .map(|row| match &row.state {
+            HostState::Succeeded => format!("{} ms", row.elapsed_ms),
+            other => describe(other),
+        })
+        .collect();
+    let detail_width = details
+        .iter()
+        .map(|detail| detail.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let mut all_reachable = true;
+    let lines = rows
+        .iter()
+        .zip(details.iter())
+        .map(|(row, detail)| {
+            let (glyph, code) = if row.state == HostState::Succeeded {
+                ("✔", "32")
+            } else {
+                all_reachable = false;
+                ("✖", "31")
+            };
+            format!(
+                "{} {:<host_width$} {:>detail_width$}",
+                paint(color, code, glyph),
+                row.host,
+                detail
+            )
+        })
+        .collect();
+    (lines, all_reachable)
+}
+
+/// Probe every host with a trivial ssh command; latency is the ssh round trip.
+async fn ping(spec: RunSpec) -> Result<ExitCode> {
+    let hosts = spec.hosts.clone();
+    let color = use_color();
+    let (tx, mut rx) = unbounded_channel();
+    let handle = spawn_run(spec, tx);
+
+    let mut rows: Vec<Option<PingRow>> = hosts.iter().map(|_| None).collect();
+    while let Some(event) = rx.recv().await {
+        let RunEvent::Finished {
+            idx,
+            state,
+            elapsed_ms,
+        } = event
+        else {
+            continue;
+        };
+        let Some(slot) = rows.get_mut(idx) else {
+            continue;
+        };
+        *slot = Some(PingRow {
+            host: hosts[idx].clone(),
+            state,
+            elapsed_ms,
+        });
+    }
+    let _summary = handle.wait().await;
+
+    let rows: Vec<PingRow> = rows.into_iter().flatten().collect();
+    let total = rows.len();
+    let reachable = rows
+        .iter()
+        .filter(|row| row.state == HostState::Succeeded)
+        .count();
+    let (lines, all_reachable) = ping_report(&rows, color);
+    for line in lines {
+        println!("{line}");
+    }
+    if all_reachable {
+        println!("{} {reachable}/{total} reachable", paint(color, "32", "✔"));
+        Ok(ExitCode::SUCCESS)
+    } else {
+        println!(
+            "{} {reachable}/{total} reachable · {} unreachable",
+            paint(color, "31", "✖"),
+            total - reachable
+        );
+        Ok(ExitCode::FAILURE)
+    }
+}
+
 fn describe(state: &HostState) -> String {
     match state {
         HostState::Succeeded => "ok".to_string(),
         HostState::Failed(Some(code)) => format!("exit {code}"),
         HostState::Failed(None) => "signal".to_string(),
         HostState::Errored(message) => format!("error: {message}"),
+        HostState::TimedOut(limit) => format!("timeout after {:.1}s", limit.as_secs_f64()),
         HostState::Cancelled => "cancelled".to_string(),
         HostState::Pending => "queued".to_string(),
         HostState::Running => "running".to_string(),
@@ -412,6 +580,81 @@ all = ["@pve", "@prox"]
 
     fn cli(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("cli parses")
+    }
+
+    #[test]
+    fn ping_accepts_hosts_and_group_names_positionally() {
+        let config = config();
+        let spec =
+            ping_targets(&config, &cli(&["dsh", "ping", "pve", "10.0.0.5"])).expect("resolves");
+        assert_eq!(
+            spec,
+            vec!["pve00.jacd.local", "pve01.jacd.local", "10.0.0.5"],
+            "a configured group name expands, anything else is a host"
+        );
+
+        let spec =
+            ping_targets(&config, &cli(&["dsh", "ping", "pve00.jacd.local"])).expect("resolves");
+        assert_eq!(spec, vec!["pve00.jacd.local"]);
+
+        let spec = ping_targets(&config, &cli(&["dsh", "ping", "-g", "prox"])).expect("resolves");
+        assert_eq!(
+            spec,
+            vec!["prox00.jacd.local"],
+            "without positional targets the -g/-H flags apply"
+        );
+
+        assert!(ping_targets(&config, &cli(&["dsh", "ping"])).is_err());
+    }
+
+    #[test]
+    fn ping_report_marks_reachable_and_unreachable_hosts() {
+        let rows = vec![
+            PingRow {
+                host: "pve00.jacd.local".into(),
+                state: HostState::Succeeded,
+                elapsed_ms: 42,
+            },
+            PingRow {
+                host: "pve01.jacd.local".into(),
+                state: HostState::TimedOut(std::time::Duration::from_secs(10)),
+                elapsed_ms: 10_000,
+            },
+            PingRow {
+                host: "pve02.jacd.local".into(),
+                state: HostState::Failed(Some(255)),
+                elapsed_ms: 1200,
+            },
+        ];
+        let (lines, all_reachable) = ping_report(&rows, false);
+        assert!(!all_reachable);
+        assert!(
+            lines[0].contains("pve00.jacd.local") && lines[0].contains("42 ms"),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("timeout after 10.0s"), "{lines:?}");
+        assert!(lines[2].contains("exit 255"), "{lines:?}");
+        assert_eq!(lines.len(), 3, "one line per host, in host order");
+    }
+
+    #[test]
+    fn ping_parses_targets_and_a_timeout() {
+        let plain = cli(&["dsh", "ping"]);
+        match plain.command {
+            Some(Command::Ping {
+                ref targets,
+                timeout,
+            }) => {
+                assert!(targets.is_empty());
+                assert_eq!(timeout, DEFAULT_PING_TIMEOUT_SECS);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+        let tuned = cli(&["dsh", "ping", "-H", "pve00.jacd.local", "--timeout", "3"]);
+        match tuned.command {
+            Some(Command::Ping { timeout, .. }) => assert_eq!(timeout, 3),
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]

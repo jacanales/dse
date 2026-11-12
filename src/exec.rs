@@ -5,7 +5,7 @@
 //! and the tests all consume the same stream.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
@@ -31,6 +31,8 @@ pub enum HostState {
     Failed(Option<i32>),
     /// dsh could not even start or finish the ssh process.
     Errored(String),
+    /// The host did not answer within the configured timeout; the child was killed.
+    TimedOut(Duration),
     /// The run was aborted before this host finished.
     Cancelled,
 }
@@ -39,7 +41,10 @@ impl HostState {
     pub fn is_failure(&self) -> bool {
         matches!(
             self,
-            HostState::Failed(_) | HostState::Errored(_) | HostState::Cancelled
+            HostState::Failed(_)
+                | HostState::Errored(_)
+                | HostState::TimedOut(_)
+                | HostState::Cancelled
         )
     }
 }
@@ -69,6 +74,9 @@ pub struct RunSpec {
     pub command: String,
     pub concurrency: usize,
     pub ssh: SshSettings,
+    /// Per-host limit; `None` waits as long as ssh needs. On expiry the child is
+    /// killed and the host is reported as `TimedOut`.
+    pub timeout: Option<Duration>,
 }
 
 /// How the run ended, aggregated across hosts.
@@ -135,6 +143,7 @@ pub fn spawn_run(spec: RunSpec, events: UnboundedSender<RunEvent>) -> RunHandle 
         let gate = Arc::new(Semaphore::new(permits));
         let mut tasks: JoinSet<(usize, HostState)> = JoinSet::new();
 
+        let timeout = spec.timeout;
         for (idx, host) in hosts.iter().cloned().enumerate() {
             let gate = Arc::clone(&gate);
             let events = events.clone();
@@ -144,7 +153,7 @@ pub fn spawn_run(spec: RunSpec, events: UnboundedSender<RunEvent>) -> RunHandle 
                 let Ok(_permit) = gate.acquire_owned().await else {
                     return (idx, HostState::Cancelled);
                 };
-                let state = run_host(idx, &host, &command, &ssh, &events).await;
+                let state = run_host(idx, &host, &command, &ssh, timeout, &events).await;
                 (idx, state)
             });
         }
@@ -194,6 +203,7 @@ async fn run_host(
     host: &str,
     command: &str,
     ssh: &SshSettings,
+    limit: Option<Duration>,
     events: &UnboundedSender<RunEvent>,
 ) -> HostState {
     let _ = events.send(RunEvent::Started { idx });
@@ -236,20 +246,52 @@ async fn run_host(
         );
     };
 
-    let out_pump = pump(stdout, events.clone(), idx, Stream::Stdout);
-    let err_pump = pump(stderr, events.clone(), idx, Stream::Stderr);
-    let (_, _, status) = tokio::join!(out_pump, err_pump, wait_child(&mut child));
+    let out_pump = tokio::spawn(pump(stdout, events.clone(), idx, Stream::Stdout));
+    let err_pump = tokio::spawn(pump(stderr, events.clone(), idx, Stream::Stderr));
+    let waited = wait_bounded(&mut child, limit).await;
 
-    let state = match status {
-        Ok(status) if status.success() => HostState::Succeeded,
-        Ok(status) => HostState::Failed(status.code()),
-        Err(err) => errored_str(&err.to_string()),
+    let state = match waited {
+        // A timed-out host is abandoned: its pipes may still be held by a
+        // grandchild that outlives the kill, and waiting for EOF would defeat
+        // the timeout.
+        Wait::TimedOut(limit) => {
+            out_pump.abort();
+            err_pump.abort();
+            HostState::TimedOut(limit)
+        }
+        Wait::Exited(status) => {
+            // Draining before finishing keeps the last lines of output.
+            let _ = out_pump.await;
+            let _ = err_pump.await;
+            match status {
+                Ok(status) if status.success() => HostState::Succeeded,
+                Ok(status) => HostState::Failed(status.code()),
+                Err(err) => errored_str(&err.to_string()),
+            }
+        }
     };
     finish(idx, events, started, state)
 }
 
-async fn wait_child(child: &mut Child) -> std::io::Result<std::process::ExitStatus> {
-    child.wait().await
+enum Wait {
+    Exited(std::io::Result<std::process::ExitStatus>),
+    TimedOut(Duration),
+}
+
+/// Wait for the child, killing it when the per-host limit expires so the output
+/// pumps also end and the run does not hang on a dead host.
+async fn wait_bounded(child: &mut Child, limit: Option<Duration>) -> Wait {
+    let Some(limit) = limit else {
+        return Wait::Exited(child.wait().await);
+    };
+    match tokio::time::timeout(limit, child.wait()).await {
+        Ok(status) => Wait::Exited(status),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Wait::TimedOut(limit)
+        }
+    }
 }
 
 /// Forward every line of one remote stream as its own event.
@@ -326,7 +368,45 @@ mod tests {
             command: command.to_string(),
             concurrency,
             ssh,
+            timeout: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_host_that_never_answers_times_out_and_stops_early() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ssh = stub(dir.path(), "sleep 5\nexit 0\n");
+        let mut run = spec(ssh, &["slow"], "true", 2);
+        run.timeout = Some(std::time::Duration::from_millis(300));
+
+        let started = std::time::Instant::now();
+        let (tx, mut rx) = unbounded_channel();
+        let handle = spawn_run(run, tx);
+        while rx.recv().await.is_some() {}
+        let summary = handle.wait().await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(summary.succeeded, 0);
+        let expected = HostState::TimedOut(std::time::Duration::from_millis(300));
+        assert_eq!(summary.failures[0].state, expected);
+        assert_eq!(summary.exit_code(), 1);
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "the probe must not wait for the child: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fast_host_still_succeeds_under_a_timeout() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ssh = stub(dir.path(), "echo quick\nexit 0\n");
+        let mut run = spec(ssh, &["fast"], "true", 1);
+        run.timeout = Some(std::time::Duration::from_secs(10));
+        let (tx, mut rx) = unbounded_channel();
+        let handle = spawn_run(run, tx);
+        while rx.recv().await.is_some() {}
+        let summary = handle.wait().await;
+        assert_eq!(summary.succeeded, 1, "{summary:?}");
     }
 
     #[tokio::test]
