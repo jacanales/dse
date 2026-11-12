@@ -54,7 +54,13 @@ cargo install --path .         # ~/.cargo/bin/dsh
 
 ## Configure
 
-`~/.config/dsh/config.toml` (override with `--config PATH` or `$DSH_CONFIG`):
+```sh
+dsh init        # writes a starter ~/.config/dsh/config.toml (refuses to overwrite: --force)
+```
+
+`~/.config/dsh/config.toml` is resolved as `$DSH_CONFIG`, else
+`$XDG_CONFIG_HOME/dsh/config.toml`, else `$HOME/.config/dsh/config.toml`
+(override per run with `--config PATH`):
 
 ```toml
 [defaults]
@@ -75,6 +81,7 @@ Key-based ssh must already work for those host names.
 ## Use
 
 ```sh
+dsh init                     # write a starter config and print its path
 dsh                          # terminal on every configured group (Tab cycles)
 dsh -g pve                   # terminal on one group
 dsh run -g pve apt update    # one-shot run, prefixed streaming output

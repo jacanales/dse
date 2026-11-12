@@ -27,6 +27,10 @@ PoC scope: runnable end-to-end (config, fan-out engine, live TUI), not polished.
 - [x] **T4** — *S1, S2, S6* — CLI wiring: `dsh` (TUI), `dsh run`, `dsh groups`, `dsh hosts` (`src/main.rs`, `src/cli.rs`). Commit: `f15b251`.
 - [x] **T5** — *S6* — README with config example and keybindings; `cargo fmt`, `cargo clippy -D warnings`, `cargo test`. Commit: `f86fd8c`.
 
+- [x] **T6** — *S6* (user report L7) — `dsh init` writes a starter config and the
+  "config not found" error points at it; `dsh groups` reports the file actually
+  used. Commit: `feat(cli): add dsh init`.
+
 T1–T4 landed in one commit: a greenfield binary needs every module declared in
 `main.rs` to compile, so slicing per task would have produced non-building
 commits. Review workload risk: ~2.3k authored lines in `f15b251`; the next
@@ -62,5 +66,20 @@ Para conectar a las máquinas, en lugar de configurar el modo de conexión en la
   Interactive TUI smoke-tested through a pseudo-terminal (alternate screen
   entered and restored, quit on `q`); visual proof comes from the TestBackend
   render test and the preview in README.
-- **L6** (open) — Real-machine verification (the user's `*.jacd.local` fleet) is
-  pending; it needs their terminal and key access.
+- **L7** (user report) — "It seems that the config.toml file is not found: dsh:
+  cannot load config: no config file found; looked for
+  /Users/jacanales/.config/dsh/config.toml". Cause: the file did not exist yet
+  (neither `$DSH_CONFIG` nor `$XDG_CONFIG_HOME` is set). Fix: `dsh init` plus an
+  error message naming it. The user then created the file by hand and it loads.
+- **L8** (bug found while fixing L7) — `dsh groups --config <path>` printed the
+  default path instead of the one used. Fixed: the loader returns the resolved
+  path and `group_report` renders it; pinned by
+  `group_report_names_the_file_actually_used`.
+- **L9** (evidence, real config) — With the user's `~/.config/dsh/config.toml`:
+  `dsh groups` → all 4 / prox 1 / pve 3; `dsh hosts -g pve` resolved every host
+  through `ssh -G` to `jacanales@pveNN.jacd.local`; `dsh run -g prox uptime`
+  failed fast because `prox00.jacd.local` does not resolve in DNS
+  (`exit 255`, reported per host, dsh exit code 1). `prox` came from the README
+  example, not from the user's fleet.
+- **L6** (open) — Real-machine verification still needs one successful remote
+  run on the `pve` group, with the user's terminal/keys.

@@ -57,9 +57,17 @@ pub enum TargetSpec {
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error(
-        "no config file found; looked for {0} (create it with a [groups] table, or pass --hosts)"
+        "no config file found; looked for {0} — run `dsh init` to create a template, or pass --hosts"
     )]
     NotFound(String),
+    #[error("{0} already exists; use --force to overwrite it")]
+    Exists(String),
+    #[error("cannot write {path}: {source}")]
+    Write {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("cannot read {path}: {source}")]
     Read {
         path: String,
@@ -85,6 +93,32 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// Starting point written by `dsh init`; kept valid by tests.
+    pub const TEMPLATE: &'static str = r#"
+# dsh — fan one command out to a group of hosts.
+#
+# Hosts are plain OpenSSH targets, so ~/.ssh/config, keys, agent and ProxyJump
+# already apply. Key-based ssh must work for these names as it does today.
+#
+#   dsh                  open the terminal on every group (Tab cycles groups)
+#   dsh -g pve           open it on one group
+#   dsh run -g pve apt update
+#   dsh hosts -g pve     show the effective user@host:port per host
+
+[defaults]
+concurrency = 16                 # simultaneous ssh sessions
+connect_timeout_secs = 5         # forwarded as -o ConnectTimeout
+ssh_options = []                 # extra -o options, e.g. ["ServerAliveInterval=15"]
+ssh_bin = "ssh"                  # ssh client to use
+
+[groups]
+# An entry starting with "@" nests another group.
+pve     = ["pve00.jacd.local", "pve01.jacd.local", "pve02.jacd.local"]
+prox    = ["prox00.jacd.local"]
+cluster = ["@pve", "@prox"]
+
+"#;
+
     /// Parse a config document without touching the filesystem.
     #[cfg(test)]
     pub fn parse(raw: &str) -> Result<Self, ConfigError> {
@@ -121,6 +155,26 @@ impl Config {
     pub fn load() -> Result<(Self, PathBuf), ConfigError> {
         let path = Self::path()?;
         Ok((Self::load_from(&path)?, path))
+    }
+
+    /// Write the template to `path`, creating parent directories. Returns the
+    /// path written. An existing file is preserved unless `force` is set.
+    pub fn write_template(path: &std::path::Path, force: bool) -> Result<PathBuf, ConfigError> {
+        let shown = path.display().to_string();
+        if path.exists() && !force {
+            return Err(ConfigError::Exists(shown));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                path: parent.display().to_string(),
+                source,
+            })?;
+        }
+        std::fs::write(path, Self::TEMPLATE).map_err(|source| ConfigError::Write {
+            path: shown,
+            source,
+        })?;
+        Ok(path.to_path_buf())
     }
 
     /// Load a specific file, reporting its path in every error.
@@ -235,6 +289,50 @@ cluster = ["@pve", "@prox", "pve00.jacd.local"]
 
     fn sample() -> Config {
         Config::parse(SAMPLE).expect("sample config parses")
+    }
+
+    #[test]
+    fn template_is_a_valid_config_with_an_example_group() {
+        let config = Config::parse(Config::TEMPLATE).expect("the shipped template parses");
+        let hosts = config
+            .resolve(&TargetSpec::Groups(vec!["pve".into()]))
+            .expect("the example group resolves");
+        assert_eq!(hosts.len(), 3);
+        assert_eq!(config.defaults.ssh_bin, "ssh");
+    }
+
+    #[test]
+    fn init_writes_the_template_and_refuses_to_clobber() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("nested").join("dsh").join("config.toml");
+
+        let written = Config::write_template(&path, false).expect("creates parent dirs too");
+        assert_eq!(written, path);
+        let raw = std::fs::read_to_string(&path).expect("file exists");
+        Config::parse(&raw).expect("written file is valid");
+
+        std::fs::write(&path, "[groups]\nmine = [\"keep.me\"]\n").expect("user edits");
+        let err = Config::write_template(&path, false).expect_err("refuses to overwrite");
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("still there")
+                .contains("keep.me"),
+            "an existing config must survive"
+        );
+
+        Config::write_template(&path, true).expect("--force overwrites");
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("rewritten")
+                .contains("[groups]")
+        );
+    }
+
+    #[test]
+    fn missing_config_points_at_the_init_command() {
+        let err = ConfigError::NotFound("/tmp/nowhere/config.toml".to_string()).to_string();
+        assert!(err.contains("dsh init"), "{err}");
     }
 
     #[test]

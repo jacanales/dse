@@ -28,6 +28,7 @@ Config: ~/.config/dsh/config.toml (override with --config or $DSH_CONFIG)
   all  = ["@pve", "@prox"]
 
 Examples:
+  dsh init                     write a starter config.toml
   dsh                          open the fan-out terminal on every group
   dsh -g pve                   open the terminal on the pve group
   dsh run -g pve apt update    run once and stream prefixed output
@@ -68,6 +69,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Write a starter config.toml and print its path
+    Init {
+        /// Overwrite an existing config file
+        #[arg(long)]
+        force: bool,
+    },
     /// Open the fan-out terminal (default)
     Tui,
     /// Run one command and stream prefixed output to stdout
@@ -97,12 +104,20 @@ async fn run_inner() -> Result<ExitCode> {
     let cli = Cli::parse();
     let command = cli.command.as_ref();
 
+    // `init` must work before any config exists.
+    if let Some(Command::Init { force }) = command {
+        return run_init(&cli, *force);
+    }
+
     // Host listing needs no config file; everything else does.
-    let config = match load_config(&cli) {
-        Ok(config) => config,
+    let (config, config_path) = match load_config(&cli) {
+        Ok(loaded) => loaded,
         Err(err) => {
             if matches!(command, Some(Command::Hosts)) && cli.hosts.is_some() {
-                Config::default()
+                (
+                    Config::default(),
+                    Config::path().unwrap_or_else(|_| PathBuf::from("<none>")),
+                )
             } else {
                 return Err(err);
             }
@@ -116,7 +131,9 @@ async fn run_inner() -> Result<ExitCode> {
 
     match command {
         Some(Command::Groups) => {
-            list_groups(&config);
+            for line in group_report(&config, &config_path) {
+                println!("{line}");
+            }
             Ok(ExitCode::SUCCESS)
         }
         Some(Command::Hosts) => {
@@ -137,6 +154,7 @@ async fn run_inner() -> Result<ExitCode> {
             };
             run_once(spec).await
         }
+        Some(Command::Init { .. }) => unreachable!("init is handled before the config is loaded"),
         Some(Command::Tui) | None => {
             let targets = build_targets(&config, &cli)?;
             let app = App::new(targets, 0, ssh, concurrency);
@@ -146,13 +164,31 @@ async fn run_inner() -> Result<ExitCode> {
     }
 }
 
-fn load_config(cli: &Cli) -> Result<Config> {
+fn run_init(cli: &Cli, force: bool) -> Result<ExitCode> {
+    let path = match &cli.config {
+        Some(path) => path.clone(),
+        None => Config::path().context("cannot resolve the config path")?,
+    };
+    let written = Config::write_template(&path, force).context("cannot write config")?;
+    println!("wrote {}", written.display());
+    println!("edit [groups] with your hosts, then run `dsh`");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Load the config and remember which file it came from, so reported paths are
+/// always the ones actually used.
+fn load_config(cli: &Cli) -> Result<(Config, PathBuf)> {
     match &cli.config {
-        Some(path) => Config::load_from(path)
-            .with_context(|| format!("cannot load config {}", path.display())),
+        Some(path) => {
+            let config = Config::load_from(path)
+                .with_context(|| format!("cannot load config {}", path.display()))?;
+            Ok((config, path.clone()))
+        }
         None => match Config::load() {
-            Ok((config, _)) => Ok(config),
-            Err(ConfigError::NotFound(_)) if cli.hosts.is_some() => Ok(Config::default()),
+            Ok((config, path)) => Ok((config, path)),
+            Err(ConfigError::NotFound(path)) if cli.hosts.is_some() => {
+                Ok((Config::default(), PathBuf::from(path)))
+            }
             Err(err) => Err(err).context("cannot load config"),
         },
     }
@@ -238,28 +274,24 @@ fn parse_host_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn list_groups(config: &Config) {
-    println!("config  {}", config_path_hint());
+/// Render `dsh groups` output; separated from stdout so it can be asserted.
+fn group_report(config: &Config, path: &std::path::Path) -> Vec<String> {
+    let mut lines = vec![format!("config  {}", path.display())];
     if config.groups.is_empty() {
-        println!("no groups defined");
-        return;
+        lines.push("no groups defined".to_string());
+        return lines;
     }
     for group in config.group_names() {
         match config.resolve(&TargetSpec::Groups(vec![group.clone()])) {
-            Ok(hosts) => println!(
+            Ok(hosts) => lines.push(format!(
                 "{group:<12} {} host{}",
                 hosts.len(),
                 if hosts.len() == 1 { "" } else { "s" }
-            ),
-            Err(err) => println!("{group:<12} ! {err}"),
+            )),
+            Err(err) => lines.push(format!("{group:<12} ! {err}")),
         }
     }
-}
-
-fn config_path_hint() -> String {
-    Config::path()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "<unknown>".to_string())
+    lines
 }
 
 fn list_hosts(hosts: &[String], ssh: &SshSettings) -> bool {
@@ -380,6 +412,45 @@ all = ["@pve", "@prox"]
 
     fn cli(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("cli parses")
+    }
+
+    #[test]
+    fn group_report_names_the_file_actually_used() {
+        let report = group_report(&config(), std::path::Path::new("/tmp/custom/config.toml"));
+        assert_eq!(report[0], "config  /tmp/custom/config.toml");
+        assert!(
+            report
+                .iter()
+                .any(|line| line.starts_with("pve ") && line.contains("2 hosts")),
+            "{report:?}"
+        );
+
+        let broken = Config::parse("[groups]\nbad = [\"@missing\"]").expect("parses");
+        let report = group_report(&broken, std::path::Path::new("x.toml"));
+        assert!(
+            report[1].contains('!'),
+            "a broken group is reported inline: {report:?}"
+        );
+    }
+
+    #[test]
+    fn init_takes_an_optional_force_flag_and_reuses_config_path() {
+        let plain = cli(&["dsh", "init"]);
+        assert!(matches!(
+            plain.command,
+            Some(Command::Init { force: false })
+        ));
+        assert!(plain.config.is_none());
+
+        let forced = cli(&["dsh", "init", "--force", "--config", ".demo/dsh.toml"]);
+        assert!(matches!(
+            forced.command,
+            Some(Command::Init { force: true })
+        ));
+        assert_eq!(
+            forced.config.as_deref(),
+            Some(std::path::Path::new(".demo/dsh.toml"))
+        );
     }
 
     #[test]
