@@ -344,7 +344,7 @@ fn status_color(state: &HostState) -> Color {
     }
 }
 
-fn truncate(text: &str, width: usize) -> String {
+pub(crate) fn truncate(text: &str, width: usize) -> String {
     let mut out: String = text.chars().take(width).collect();
     if text.chars().count() > width {
         out.pop();

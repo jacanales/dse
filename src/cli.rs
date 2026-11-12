@@ -12,6 +12,7 @@ use tokio::sync::mpsc::unbounded_channel;
 use crate::app::{App, Target};
 use crate::config::{Config, ConfigError, TargetSpec};
 use crate::exec::{HostState, RunEvent, RunSpec, RunSummary, Stream, spawn_run};
+use crate::picker;
 use crate::ssh::{self, SshSettings};
 use crate::tui;
 
@@ -39,6 +40,8 @@ Examples:
   dse hosts -g pve             show the effective ssh endpoint per host
   dse ping -g pve              check every host answers over ssh
   dse ping pve00.jacd.local    the same, for a single machine
+  dse list [-l]                groups and their host counts (and hosts)
+  dse pick                     choose a group from a list, then open it
 "#;
 
 #[derive(Debug, Parser)]
@@ -98,8 +101,15 @@ enum Command {
         #[arg(required = true, num_args = 1.., trailing_var_arg = true, allow_hyphen_values = true, value_name = "COMMAND")]
         command: Vec<String>,
     },
-    /// List configured groups
-    Groups,
+    /// List the configured groups
+    #[command(visible_alias = "groups")]
+    List {
+        /// Also list every host of each group
+        #[arg(short = 'l', long = "long")]
+        long: bool,
+    },
+    /// Pick a group from a list, then open the terminal on it
+    Pick,
     /// Resolve each targeted host through ssh -G
     Hosts,
 }
@@ -145,12 +155,13 @@ async fn run_inner() -> Result<ExitCode> {
         .max(1);
 
     match command {
-        Some(Command::Groups) => {
-            for line in group_report(&config, &config_path) {
+        Some(Command::List { long }) => {
+            for line in group_report(&config, &config_path, *long) {
                 println!("{line}");
             }
             Ok(ExitCode::SUCCESS)
         }
+        Some(Command::Pick) => run_pick(&config, &cli, ssh, concurrency).await,
         Some(Command::Hosts) => {
             let hosts = resolve(&config, &cli)?;
             Ok(if list_hosts(&hosts, &ssh) {
@@ -191,6 +202,21 @@ async fn run_inner() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// `dse pick`: choose a group from a list, then open the terminal on it.
+async fn run_pick(
+    config: &Config,
+    cli: &Cli,
+    ssh: SshSettings,
+    concurrency: usize,
+) -> Result<ExitCode> {
+    let targets = build_targets(config, cli)?;
+    if let Some(chosen) = picker::run(targets).await.context("group picker failed")? {
+        let app = App::new(vec![chosen], 0, ssh, concurrency);
+        tui::run(app).await.context("terminal session failed")?;
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_init(cli: &Cli, force: bool) -> Result<ExitCode> {
@@ -304,7 +330,7 @@ fn parse_host_list(raw: &str) -> Vec<String> {
 }
 
 /// Render `dse groups` output; separated from stdout so it can be asserted.
-fn group_report(config: &Config, path: &std::path::Path) -> Vec<String> {
+fn group_report(config: &Config, path: &std::path::Path, long: bool) -> Vec<String> {
     let mut lines = vec![format!("config  {}", path.display())];
     if config.groups.is_empty() {
         lines.push("no groups defined".to_string());
@@ -312,11 +338,16 @@ fn group_report(config: &Config, path: &std::path::Path) -> Vec<String> {
     }
     for group in config.group_names() {
         match config.resolve(&TargetSpec::Groups(vec![group.clone()])) {
-            Ok(hosts) => lines.push(format!(
-                "{group:<12} {} host{}",
-                hosts.len(),
-                if hosts.len() == 1 { "" } else { "s" }
-            )),
+            Ok(hosts) => {
+                lines.push(format!(
+                    "{group:<12} {} host{}",
+                    hosts.len(),
+                    if hosts.len() == 1 { "" } else { "s" }
+                ));
+                if long {
+                    lines.extend(hosts.iter().map(|host| format!("    {host}")));
+                }
+            }
             Err(err) => lines.push(format!("{group:<12} ! {err}")),
         }
     }
@@ -658,8 +689,54 @@ all = ["@pve", "@prox"]
     }
 
     #[test]
+    fn list_shows_groups_and_optionally_their_hosts() {
+        let config = config();
+        let short = group_report(&config, std::path::Path::new("x.toml"), false);
+        assert!(
+            short
+                .iter()
+                .any(|line| line.starts_with("pve ") && line.contains("2 hosts"))
+        );
+        assert!(
+            !short.iter().any(|line| line.contains("pve00.jacd.local")),
+            "{short:?}"
+        );
+
+        let long = group_report(&config, std::path::Path::new("x.toml"), true);
+        assert!(
+            long.iter().any(|line| line.trim() == "pve00.jacd.local"),
+            "every host is listed with --long: {long:?}"
+        );
+        assert!(long.iter().any(|line| line.contains("hosts")), "{long:?}");
+    }
+
+    #[test]
+    fn list_and_pick_parse_with_the_groups_alias() {
+        assert!(matches!(
+            cli(&["dse", "list"]).command,
+            Some(Command::List { long: false })
+        ));
+        assert!(matches!(
+            cli(&["dse", "list", "--long"]).command,
+            Some(Command::List { long: true })
+        ));
+        assert!(
+            matches!(
+                cli(&["dse", "groups"]).command,
+                Some(Command::List { long: false })
+            ),
+            "the old name keeps working"
+        );
+        assert!(matches!(cli(&["dse", "pick"]).command, Some(Command::Pick)));
+    }
+
+    #[test]
     fn group_report_names_the_file_actually_used() {
-        let report = group_report(&config(), std::path::Path::new("/tmp/custom/config.toml"));
+        let report = group_report(
+            &config(),
+            std::path::Path::new("/tmp/custom/config.toml"),
+            false,
+        );
         assert_eq!(report[0], "config  /tmp/custom/config.toml");
         assert!(
             report
@@ -669,7 +746,7 @@ all = ["@pve", "@prox"]
         );
 
         let broken = Config::parse("[groups]\nbad = [\"@missing\"]").expect("parses");
-        let report = group_report(&broken, std::path::Path::new("x.toml"));
+        let report = group_report(&broken, std::path::Path::new("x.toml"), false);
         assert!(
             report[1].contains('!'),
             "a broken group is reported inline: {report:?}"

@@ -81,13 +81,37 @@ dse run -g pve apt update            # one-shot run, prefixed streaming output
 dse run -H 10.0.0.9,10.0.0.10 uptime # ad-hoc hosts, no config needed
 dse ping -g pve                      # can every host be reached over ssh?
 dse ping pve00.example.net           # a single machine
-dse groups                           # groups and their host counts
+dse list                             # groups and their host counts
+dse list --long                      # ... and every host of each group
+dse pick                             # choose a group from a list, then open it
 dse hosts -g pve                     # effective user@host:port resolved via ssh -G
 dse init                             # write a starter config.toml
 ```
 
 `dse run` and `dse ping` exit `0` only when every host succeeded (or answered);
 `1` otherwise, so they compose in scripts and CI.
+
+### `dse pick`: choose a group without typing its name
+
+![dse pick](docs/screenshots/tui-pick.png)
+
+`dse pick` shows every configured group with its host count, previews the hosts
+of the highlighted one, and opens the terminal on the group you choose — the
+same thing as `dse -g <group>`, without remembering the name. `↑`/`↓` (or `j`/`k`)
+move, `Enter` opens, `q`/`Esc` cancels.
+
+For scripts and for a quick look there is `dse list`:
+
+```text
+config  ~/.config/dse/config.toml
+all          12 hosts
+db            3 hosts
+prox          2 hosts
+pve           7 hosts
+```
+
+`dse list --long` prints every host under its group, and `dse groups` still works
+as an alias of `dse list`.
 
 ### `dse ping`: check a fleet without touching it
 

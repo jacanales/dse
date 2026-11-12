@@ -52,7 +52,7 @@ pub async fn run(mut app: App) -> io::Result<()> {
 }
 
 /// Read keys on a blocking thread; terminal input is not async on every platform.
-fn spawn_key_reader() -> tokio::sync::mpsc::Receiver<KeyEvent> {
+pub(crate) fn spawn_key_reader() -> tokio::sync::mpsc::Receiver<KeyEvent> {
     let (tx, rx) = channel(64);
     std::thread::spawn(move || {
         loop {
