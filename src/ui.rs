@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::{App, Focus, HostView};
+use crate::app::{App, Focus, HostView, SearchState};
 use crate::exec::{HostState, Stream};
 
 pub const ACCENT: Color = Color::Rgb(0x6e, 0xe7, 0xf9);
@@ -29,9 +29,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     .areas(frame.area());
 
     draw_header(frame, app, header);
-    match app.focus {
-        Focus::Prompt => draw_hosts(frame, app, body),
+    match &app.focus {
         Focus::Detail => draw_detail(frame, app, body),
+        // Searching keeps the host list in view; the prompt shows the search.
+        _ => draw_hosts(frame, app, body),
     }
     draw_prompt(frame, app, prompt);
     draw_hints(frame, app, hints);
@@ -224,8 +225,41 @@ fn draw_detail(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+/// zsh-style reverse search line: `(reverse-i-search)'query': match`.
+fn draw_search(frame: &mut Frame, app: &App, area: Rect, search: &SearchState) {
+    let block = rounded(WARN).title(Line::from(Span::styled(
+        " history search ",
+        Style::new().fg(MUTED),
+    )));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let query: String = search.query.iter().collect();
+    let mut spans = vec![
+        Span::styled("(reverse-i-search)", Style::new().fg(MUTED)),
+        Span::styled(
+            format!("'{query}'"),
+            Style::new().fg(WARN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": ", Style::new().fg(MUTED)),
+    ];
+    match app.search_match_text() {
+        Some(text) => spans.push(Span::styled(text, Style::new().fg(TEXT))),
+        None => spans.push(Span::styled("no match", Style::new().fg(DANGER))),
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+
+    let caret = ("(reverse-i-search)'".chars().count() + search.cursor)
+        .min(inner.width.saturating_sub(1) as usize);
+    frame.set_cursor_position(Position::new(inner.x + caret as u16, inner.y));
+}
+
 fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
-    let focused = app.focus == Focus::Prompt;
+    if let Some(search) = app.search_state() {
+        draw_search(frame, app, area, search);
+        return;
+    }
+    let focused = matches!(app.focus, Focus::Prompt);
     let border = if focused { ACCENT } else { MUTED };
     let block = rounded(border).title(Line::from(Span::styled(
         " command ",
@@ -253,11 +287,13 @@ fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_hints(frame: &mut Frame, app: &App, area: Rect) {
+    // The counter needs ~22 columns; the keys get the rest.
     let [left, right] =
-        Layout::horizontal([Constraint::Min(10), Constraint::Length(56)]).areas(area);
-    let keys = match app.focus {
-        Focus::Prompt if app.running => " ^C cancel · Tab group · ↑↓ host · Enter view ",
-        Focus::Prompt => " Enter run · Tab group · ↑↓ host · Enter view · ^C clear · q quit ",
+        Layout::horizontal([Constraint::Min(20), Constraint::Length(24)]).areas(area);
+    let keys = match &app.focus {
+        Focus::Search(_) => " type to filter · ^R/↑ older · ↓ newer · Enter use · Esc cancel ",
+        Focus::Prompt if app.running => " ^C cancel · ↑↓ history · Tab group · Enter view ",
+        Focus::Prompt => " Enter run · ↑↓ history · ^R search · Tab group · q quit ",
         Focus::Detail => " ↑↓ scroll · Esc back · ^C cancel · q quit ",
     };
     let counter = format!(
@@ -416,6 +452,21 @@ mod tests {
     }
 
     #[test]
+    fn search_line_shows_the_query_and_the_match() {
+        let mut app = app_with_progress();
+        app.history = vec!["apt update".into(), "apt install nginx".into()];
+        app.begin_search();
+        for ch in "inst".chars() {
+            app.search_insert(ch);
+        }
+        let screen = rendered(&app);
+        assert!(screen.contains("reverse-i-search"), "{screen}");
+        assert!(screen.contains("'inst'"), "{screen}");
+        assert!(screen.contains("apt install nginx"), "{screen}");
+        assert!(screen.contains("Esc cancel"), "{screen}");
+    }
+
+    #[test]
     fn detail_view_shows_per_host_output() {
         let mut app = app_with_progress();
         app.open_detail();
@@ -432,6 +483,17 @@ mod tests {
         let mut app = app_with_progress();
         app.input = "apt update".chars().collect();
         app.cursor = app.input.len();
+        let screen: Vec<char> = rendered(&app).chars().collect();
+        for chunk in screen.chunks(96) {
+            println!("{}", chunk.iter().collect::<String>());
+        }
+
+        println!("\n--- reverse search ---");
+        app.history = vec!["apt update".into(), "apt install nginx".into()];
+        app.begin_search();
+        for ch in "inst".chars() {
+            app.search_insert(ch);
+        }
         let screen: Vec<char> = rendered(&app).chars().collect();
         for chunk in screen.chunks(96) {
             println!("{}", chunk.iter().collect::<String>());

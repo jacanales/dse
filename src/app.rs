@@ -20,10 +20,23 @@ pub struct Target {
     pub hosts: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Focus {
     Prompt,
     Detail,
+    /// zsh-style reverse search over the command history (Ctrl-R).
+    Search(SearchState),
+}
+
+/// State of an in-progress reverse search; the prompt is untouched while it lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchState {
+    pub query: Vec<char>,
+    pub cursor: usize,
+    /// Index into `App::history` of the current match, newest-first on entry.
+    pub match_idx: Option<usize>,
+    previous_input: Vec<char>,
+    previous_cursor: usize,
 }
 
 /// A line of remote output tagged with the stream it came from.
@@ -87,6 +100,8 @@ pub struct App {
     pub cursor: usize,
     pub history: Vec<String>,
     pub history_pos: Option<usize>,
+    /// Line being typed before the user started walking the history.
+    draft: Option<Vec<char>>,
     pub focus: Focus,
     pub selection: usize,
     pub detail_scroll: usize,
@@ -115,6 +130,7 @@ impl App {
             cursor: 0,
             history: Vec::new(),
             history_pos: None,
+            draft: None,
             focus: Focus::Prompt,
             selection: 0,
             detail_scroll: 0,
@@ -206,10 +222,7 @@ impl App {
         if command.is_empty() || self.running || hosts.is_empty() {
             return false;
         }
-        self.history.push(command.clone());
-        if self.history.len() > HISTORY_LIMIT {
-            self.history.remove(0);
-        }
+        self.record_history(&command);
         self.history_pos = None;
         self.reset_hosts();
         self.running = true;
@@ -396,12 +409,27 @@ impl App {
     }
 
     /// Recall history: `back` walks towards older entries.
+    /// Remember a command, merging consecutive repeats like zsh's HIST_IGNORE_DUPS.
+    pub fn record_history(&mut self, command: &str) {
+        if self.history.last().map(String::as_str) == Some(command) {
+            return;
+        }
+        self.history.push(command.to_string());
+        if self.history.len() > HISTORY_LIMIT {
+            self.history.remove(0);
+        }
+    }
+
+    /// Walk the history with ↑/↓. Leaving history restores the unfinished line.
     pub fn recall_history(&mut self, back: bool) {
         if self.history.is_empty() {
             return;
         }
         let next = match (self.history_pos, back) {
-            (None, true) => Some(self.history.len() - 1),
+            (None, true) => {
+                self.draft = Some(self.input.clone());
+                Some(self.history.len() - 1)
+            }
             (None, false) => None,
             (Some(0), true) => Some(0),
             (Some(pos), true) => Some(pos - 1),
@@ -414,7 +442,147 @@ impl App {
                 self.input = self.history[pos].chars().collect();
                 self.cursor = self.input.len();
             }
-            None => self.clear_input(),
+            None => {
+                // Back at the live line: restore the draft when walking past it.
+                let draft = self.draft.take().unwrap_or_default();
+                self.cursor = draft.len();
+                self.input = draft;
+            }
+        }
+    }
+
+    // --- reverse search (Ctrl-R) ---------------------------------------------
+
+    pub fn is_searching(&self) -> bool {
+        matches!(self.focus, Focus::Search(_))
+    }
+
+    pub fn search_state(&self) -> Option<&SearchState> {
+        match &self.focus {
+            Focus::Search(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    pub fn search_query(&self) -> Option<String> {
+        self.search_state()
+            .map(|state| state.query.iter().collect())
+    }
+
+    /// Most recent command containing the query.
+    pub fn search_match_text(&self) -> Option<String> {
+        let index = self.search_state()?.match_idx?;
+        self.history.get(index).cloned()
+    }
+
+    pub fn begin_search(&mut self) -> bool {
+        if self.history.is_empty() {
+            self.notice = "no command history yet".to_string();
+            return false;
+        }
+        self.focus = Focus::Search(SearchState {
+            query: Vec::new(),
+            cursor: 0,
+            match_idx: None,
+            previous_input: self.input.clone(),
+            previous_cursor: self.cursor,
+        });
+        self.refresh_search();
+        true
+    }
+
+    pub fn search_insert(&mut self, ch: char) {
+        match &mut self.focus {
+            Focus::Search(state) => {
+                state.query.insert(state.cursor, ch);
+                state.cursor += 1;
+            }
+            _ => return,
+        }
+        self.refresh_search();
+    }
+
+    pub fn search_backspace(&mut self) {
+        let empty = match &mut self.focus {
+            Focus::Search(state) => {
+                if state.cursor > 0 {
+                    state.cursor -= 1;
+                    state.query.remove(state.cursor);
+                }
+                state.query.is_empty()
+            }
+            _ => return,
+        };
+        if empty {
+            self.cancel_search();
+        } else {
+            self.refresh_search();
+        }
+    }
+
+    pub fn search_move_cursor(&mut self, delta: isize) {
+        if let Focus::Search(state) = &mut self.focus {
+            let target = state.cursor as isize + delta;
+            state.cursor = target.clamp(0, state.query.len() as isize) as usize;
+        }
+    }
+
+    /// Step to the next older (`older`) or newer match; stops at the ends.
+    pub fn search_cycle(&mut self, older: bool) {
+        let Some(query) = self.search_query() else {
+            return;
+        };
+        let Some(current) = self.search_state().and_then(|state| state.match_idx) else {
+            return;
+        };
+        let found = if older {
+            search_backwards(&self.history, &query, Some(current))
+        } else {
+            search_forwards(&self.history, &query, current)
+        };
+        if let (Some(index), Focus::Search(state)) = (found, &mut self.focus) {
+            state.match_idx = Some(index);
+        }
+    }
+
+    /// Put the match in the prompt (never runs it) so it can be edited first.
+    pub fn accept_search(&mut self) {
+        let Focus::Search(state) = std::mem::replace(&mut self.focus, Focus::Prompt) else {
+            return;
+        };
+        match state
+            .match_idx
+            .and_then(|index| self.history.get(index))
+            .cloned()
+        {
+            Some(text) => {
+                self.cursor = text.chars().count();
+                self.input = text.chars().collect();
+                self.history_pos = None;
+            }
+            None => {
+                self.input = state.previous_input;
+                self.cursor = state.previous_cursor;
+            }
+        }
+    }
+
+    pub fn cancel_search(&mut self) {
+        let Focus::Search(state) = std::mem::replace(&mut self.focus, Focus::Prompt) else {
+            return;
+        };
+        self.input = state.previous_input;
+        self.cursor = state.previous_cursor;
+    }
+
+    /// Recompute the match from the current query, always newest-first.
+    fn refresh_search(&mut self) {
+        let Some(query) = self.search_query() else {
+            return;
+        };
+        let found = search_backwards(&self.history, &query, None);
+        if let Focus::Search(state) = &mut self.focus {
+            state.match_idx = found;
         }
     }
 
@@ -446,6 +614,24 @@ impl App {
     pub fn selected(&self) -> Option<&HostView> {
         self.hosts.get(self.selection)
     }
+}
+
+/// Case-insensitive substring match, like zsh's default reverse search.
+fn matches_query(entry: &str, query: &str) -> bool {
+    query.is_empty() || entry.to_lowercase().contains(&query.to_lowercase())
+}
+
+/// Newest entry before `before` (exclusive) that matches.
+fn search_backwards(history: &[String], query: &str, before: Option<usize>) -> Option<usize> {
+    let end = before.unwrap_or(history.len()).min(history.len());
+    (0..end)
+        .rev()
+        .find(|index| matches_query(&history[*index], query))
+}
+
+/// Next older-side entry after `after` (exclusive) that matches.
+fn search_forwards(history: &[String], query: &str, after: usize) -> Option<usize> {
+    ((after + 1)..history.len()).find(|index| matches_query(&history[*index], query))
 }
 
 #[cfg(test)]
@@ -564,6 +750,138 @@ mod tests {
         assert_eq!(app.input_string(), "apt update");
         app.recall_history(false);
         assert_eq!(app.input_string(), "");
+    }
+
+    #[test]
+    fn walking_history_keeps_the_unfinished_line() {
+        let mut app = app();
+        app.history = vec!["uptime".into(), "apt update".into()];
+        for ch in "df -h".chars() {
+            app.insert_char(ch);
+        }
+
+        app.recall_history(true);
+        assert_eq!(app.input_string(), "apt update");
+        app.recall_history(true);
+        assert_eq!(app.input_string(), "uptime");
+        app.recall_history(false);
+        app.recall_history(false);
+        assert_eq!(
+            app.input_string(),
+            "df -h",
+            "leaving history restores the unfinished line"
+        );
+    }
+
+    #[test]
+    fn repeated_commands_are_recorded_once_in_a_row() {
+        let mut app = app();
+        app.record_history("uptime");
+        app.record_history("uptime");
+        app.record_history("apt update");
+        app.record_history("uptime");
+        assert_eq!(app.history, vec!["uptime", "apt update", "uptime"]);
+
+        for index in 0..(HISTORY_LIMIT + 5) {
+            app.record_history(&format!("cmd {index}"));
+        }
+        assert_eq!(app.history.len(), HISTORY_LIMIT);
+        assert_eq!(app.history.last().map(String::as_str), Some("cmd 54"));
+    }
+
+    #[test]
+    fn reverse_search_finds_the_most_recent_match_first() {
+        let mut app = app();
+        app.history = vec![
+            "apt update".into(),
+            "uptime".into(),
+            "apt install nginx".into(),
+        ];
+        assert!(app.begin_search());
+
+        for ch in "apt".chars() {
+            app.search_insert(ch);
+        }
+        assert_eq!(
+            app.search_match_text().as_deref(),
+            Some("apt install nginx")
+        );
+
+        app.search_cycle(true);
+        assert_eq!(app.search_match_text().as_deref(), Some("apt update"));
+        app.search_cycle(true);
+        assert_eq!(
+            app.search_match_text().as_deref(),
+            Some("apt update"),
+            "stops at the oldest match"
+        );
+
+        app.search_cycle(false);
+        assert_eq!(
+            app.search_match_text().as_deref(),
+            Some("apt install nginx")
+        );
+        app.search_cycle(false);
+        assert_eq!(
+            app.search_match_text().as_deref(),
+            Some("apt install nginx"),
+            "stops at the newest match"
+        );
+    }
+
+    #[test]
+    fn reverse_search_ignores_case_and_accepting_fills_the_prompt() {
+        let mut app = app();
+        app.history = vec!["APT UPDATE".into(), "uptime".into()];
+        app.begin_search();
+        for ch in "apt".chars() {
+            app.search_insert(ch);
+        }
+        assert_eq!(app.search_match_text().as_deref(), Some("APT UPDATE"));
+
+        app.search_insert('x');
+        assert_eq!(app.search_match_text(), None, "no match keeps the query");
+
+        app.search_backspace();
+        assert_eq!(app.search_match_text().as_deref(), Some("APT UPDATE"));
+
+        app.accept_search();
+        assert_eq!(app.focus, Focus::Prompt);
+        assert_eq!(app.input_string(), "APT UPDATE");
+        assert_eq!(app.cursor, "APT UPDATE".len(), "cursor lands at the end");
+    }
+
+    #[test]
+    fn cancelling_and_accepting_without_a_match_restore_the_previous_line() {
+        let mut app = app();
+        app.history = vec!["uptime".into()];
+        for ch in "df -h".chars() {
+            app.insert_char(ch);
+        }
+
+        app.begin_search();
+        app.search_insert('z');
+        app.cancel_search();
+        assert_eq!(app.focus, Focus::Prompt);
+        assert_eq!(app.input_string(), "df -h");
+
+        app.begin_search();
+        app.search_insert('z');
+        app.accept_search();
+        assert_eq!(
+            app.input_string(),
+            "df -h",
+            "no match means nothing to reuse"
+        );
+        assert_eq!(app.cursor, "df -h".len());
+    }
+
+    #[test]
+    fn search_without_history_explains_itself() {
+        let mut app = app();
+        assert!(!app.begin_search());
+        assert_eq!(app.focus, Focus::Prompt);
+        assert_eq!(app.notice, "no command history yet");
     }
 
     /// End-to-end path of S2: typing a command in the sub-terminal runs it on

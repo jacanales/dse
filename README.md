@@ -117,14 +117,27 @@ Nothing changes on the remote machines.
 | Key | Action |
 | --- | --- |
 | `Enter` | run the typed command (with empty input: open the selected host) |
-| `Tab` | switch target/group |
-| `↑` `↓` | select host (in detail view: scroll) |
-| `Ctrl-P` `Ctrl-N` | previous/next command from history |
+| `↑` `↓` | walk the command history |
+| `Ctrl-R` | reverse-search the history, zsh style |
+| `Ctrl-P` `Ctrl-N` | select previous/next host |
 | `Ctrl-A` `Ctrl-E` | cursor to start/end of the line |
 | `Ctrl-U` | clear the line |
+| `Tab` | switch target/group |
 | `Ctrl-C` | cancel the running command, else clear the line |
-| `Esc` | leave the detail view |
+| `Esc` | leave the search or the detail view |
 | `q` `Ctrl-D` | quit (when the line is empty) |
+
+Inside the reverse search: type to filter (case-insensitive substring), `Ctrl-R`
+or `↑` for older matches, `↓` or `Ctrl-S` for newer ones, `Enter` puts the match
+in the prompt (it never runs it for you), `Esc` cancels and restores the line
+you were typing.
+
+### Command history
+
+`dsh` keeps the last 50 commands of the session, merging consecutive repeats
+(zsh's `HIST_IGNORE_DUPS`): running `apt update` three times leaves one entry.
+Walking with `↑` and back down restores the unfinished line you had typed.
+History lives in memory for the session; it is not written to disk.
 
 ## How it works
 
