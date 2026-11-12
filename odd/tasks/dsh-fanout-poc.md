@@ -21,11 +21,16 @@ PoC scope: runnable end-to-end (config, fan-out engine, live TUI), not polished.
 
 ## Tasks
 
-- **T1** — *S5* — Config + target resolution + SSH resolution (`src/config.rs`, `src/ssh.rs`), with tests. Commit: `feat(config)`.
-- **T2** — *S2, S4, S7* — Fan-out engine: concurrent bounded execution, per-host stdout/stderr/exit events, summary + exit code (`src/exec.rs`), tests against a stub ssh. Commit: `feat(exec)`.
-- **T3** — *S3* — TUI: prompt line, per-host live status, progress gauge, detail view (`src/tui/`). Commit: `feat(tui)`.
-- **T4** — *S1, S2, S6* — CLI wiring: `dsh` (TUI), `dsh run`, `dsh groups`, `dsh hosts` (`src/main.rs`, `src/cli.rs`). Commit: `feat(cli)`.
-- **T5** — *S6* — README with config example and keybindings; `cargo fmt`, `cargo clippy -D warnings`, `cargo test`. Commit: `docs`.
+- [x] **T1** — *S5* — Config + target resolution + SSH resolution (`src/config.rs`, `src/ssh.rs`), with tests. Commit: `f15b251`.
+- [x] **T2** — *S2, S4, S7* — Fan-out engine: concurrent bounded execution, per-host stdout/stderr/exit events, summary + exit code (`src/exec.rs`), tests against a stub ssh. Commit: `f15b251`.
+- [x] **T3** — *S3* — TUI: prompt line, per-host live status, progress gauge, detail view (`src/app.rs`, `src/ui.rs`, `src/tui.rs`). Commit: `f15b251`.
+- [x] **T4** — *S1, S2, S6* — CLI wiring: `dsh` (TUI), `dsh run`, `dsh groups`, `dsh hosts` (`src/main.rs`, `src/cli.rs`). Commit: `f15b251`.
+- [x] **T5** — *S6* — README with config example and keybindings; `cargo fmt`, `cargo clippy -D warnings`, `cargo test`. Commit: `f86fd8c`.
+
+T1–T4 landed in one commit: a greenfield binary needs every module declared in
+`main.rs` to compile, so slicing per task would have produced non-building
+commits. Review workload risk: ~2.3k authored lines in `f15b251`; the next
+increments land as separate work units.
 
 ## Log
 
@@ -40,3 +45,22 @@ Algunos proyectos similares que hacen esto y de los que puedes coger ideas son: 
 
 Para conectar a las máquinas, en lugar de configurar el modo de conexión en la propia app, aprovecharemos la configuración de ssh. Es decir, para crear un grupo de máquinas simplemente tendremos que configurar: "pve00.jacd.local, pve01.jacd.local, pve02.jacd.local" y como ya tengo SSH configurado para conectar por clave a esas máquinas, podrá conectarse. Con esta información crea una PoC inicial y luego la iremos puliendo para tener una herramienta facil de utilizar, rápida y moderna.
 ```
+
+- **L2** (decision, S5) — Connection layer is the system `ssh` binary, not a
+  native client: `~/.ssh/config`, keys, agent and `ProxyJump` keep working with
+  zero reimplementation. Fresh `ssh -G <target>` is used only to display the
+  effective `user@host:port`. A native/multiplexed client stays on the roadmap.
+- **L3** (decision, S2) — The "sub-terminal" is an in-TUI prompt, not a child
+  terminal: the same engine feeds both the TUI and `dsh run`, so behavior and
+  exit codes cannot drift between interactive and scripted use.
+- **L4** (decision, S5) — Groups live in `~/.config/dsh/config.toml`; nesting via
+  `@group`. The file holds host names only, never credentials.
+- **L5** (evidence) — `cargo test`: 39 passed, 1 ignored (screen dump aid);
+  `cargo clippy --all-targets -- -D warnings` clean; `cargo fmt --check` clean.
+  End-to-end CLI demo against a scripted ssh stub: `dsh groups`, `dsh hosts -g pve`,
+  `dsh run -g pve apt update` (exit 1 with one stub host failing 100), `dsh run -H ...`.
+  Interactive TUI smoke-tested through a pseudo-terminal (alternate screen
+  entered and restored, quit on `q`); visual proof comes from the TestBackend
+  render test and the preview in README.
+- **L6** (open) — Real-machine verification (the user's `*.jacd.local` fleet) is
+  pending; it needs their terminal and key access.
