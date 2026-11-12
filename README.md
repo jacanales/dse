@@ -85,11 +85,30 @@ dse list                             # groups and their host counts
 dse list --long                      # ... and every host of each group
 dse pick                             # choose a group from a list, then open it
 dse hosts -g pve                     # effective user@host:port resolved via ssh -G
+dse config                           # show the config file and where it lives
+dse config -e                        # open it in $VISUAL / $EDITOR
 dse init                             # write a starter config.toml
 ```
 
 `dse run` and `dse ping` exit `0` only when every host succeeded (or answered);
 `1` otherwise, so they compose in scripts and CI.
+
+### `dse config`: see and edit the file
+
+```sh
+dse config        # path on the first line, then the file verbatim
+dse config -e     # same resolution, opened in $VISUAL, else $EDITOR, else vi
+```
+
+`dse config` never guesses: it prints the path it resolved (`--config`, then
+`$DSE_CONFIG`, then `$XDG_CONFIG_HOME/dse`, then `~/.config/dse`), so it is
+obvious which file is in play. If the file does not exist it says so and exits
+`1`.
+
+`dse config -e` creates the file from the template when missing, runs your
+editor with stdio inherited, and then **parses the result**: a broken edit is
+reported immediately with its TOML error and exit code `1` instead of failing
+at the next command.
 
 ### `dse pick`: choose a group without typing its name
 

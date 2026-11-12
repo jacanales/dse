@@ -40,6 +40,7 @@ Examples:
   dse hosts -g pve             show the effective ssh endpoint per host
   dse ping -g pve              check every host answers over ssh
   dse ping pve00.jacd.local    the same, for a single machine
+  dse config [-e]              show the config file and its path (or edit it)
   dse list [-l]                groups and their host counts (and hosts)
   dse pick                     choose a group from a list, then open it
 "#;
@@ -110,6 +111,12 @@ enum Command {
     },
     /// Pick a group from a list, then open the terminal on it
     Pick,
+    /// Show the config file and where it lives (or edit it)
+    Config {
+        /// Open the file in $VISUAL / $EDITOR
+        #[arg(short = 'e', long = "edit")]
+        edit: bool,
+    },
     /// Resolve each targeted host through ssh -G
     Hosts,
 }
@@ -132,6 +139,10 @@ async fn run_inner() -> Result<ExitCode> {
     // `init` must work before any config exists.
     if let Some(Command::Init { force }) = command {
         return run_init(&cli, *force);
+    }
+    // `config` is about the file itself, so it must not fail on a missing one.
+    if let Some(Command::Config { edit }) = command {
+        return run_config(&cli, *edit).await;
     }
 
     // Host listing needs no config file; everything else does.
@@ -195,6 +206,9 @@ async fn run_inner() -> Result<ExitCode> {
             ping(spec).await
         }
         Some(Command::Init { .. }) => unreachable!("init is handled before the config is loaded"),
+        Some(Command::Config { .. }) => {
+            unreachable!("config is handled before the config is loaded")
+        }
         Some(Command::Tui) | None => {
             let targets = build_targets(&config, &cli)?;
             let app = App::new(targets, 0, ssh, concurrency);
@@ -217,6 +231,97 @@ async fn run_pick(
         tui::run(app).await.context("terminal session failed")?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Resolve the config path, preferring an explicit `--config`.
+fn config_path(cli: &Cli) -> Result<PathBuf> {
+    match &cli.config {
+        Some(path) => Ok(path.clone()),
+        None => Config::path().context("cannot resolve the config path"),
+    }
+}
+
+/// `dse config`: show the file and its location, or hand it to an editor.
+async fn run_config(cli: &Cli, edit: bool) -> Result<ExitCode> {
+    let path = config_path(cli)?;
+    if edit {
+        return edit_config(&path).await;
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => {
+            for line in config_report(&path, &raw) {
+                println!("{line}");
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            println!("{}", path.display());
+            println!("no config file yet: create one with `dse init`");
+            Ok(ExitCode::FAILURE)
+        }
+        Err(err) => Err(err).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+async fn edit_config(path: &std::path::Path) -> Result<ExitCode> {
+    if !path.exists() {
+        Config::write_template(path, false).context("cannot create config")?;
+        println!("created {}", path.display());
+    }
+    let editor = editor_command(|key| std::env::var_os(key))
+        .context("no editor configured: set $VISUAL or $EDITOR")?;
+    let argv = editor_argv(&editor);
+    let (bin, args) = argv.split_first().context("the editor command is empty")?;
+    let status = tokio::process::Command::new(bin)
+        .args(args)
+        .arg(path)
+        .status()
+        .await
+        .with_context(|| format!("cannot run {editor}"))?;
+    if !status.success() {
+        bail!("{editor} exited with {status}");
+    }
+    // Editing can break the file; say so now instead of at the next command.
+    match Config::load_from(path) {
+        Ok(config) => {
+            println!(
+                "{} · {} group{} · valid",
+                path.display(),
+                config.groups.len(),
+                if config.groups.len() == 1 { "" } else { "s" }
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(err) => {
+            eprintln!("dse: {} is not valid: {err}", path.display());
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// The file, preceded by its own path, so the output is self-describing.
+fn config_report(path: &std::path::Path, raw: &str) -> Vec<String> {
+    let mut lines = vec![path.display().to_string()];
+    lines.extend(raw.lines().map(str::to_string));
+    lines
+}
+
+/// `$VISUAL`, then `$EDITOR`, then `vi`. Blank values are ignored.
+fn editor_command(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<String> {
+    for key in ["VISUAL", "EDITOR"] {
+        if let Some(value) = lookup(key) {
+            let value = value.to_string_lossy().trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    Some("vi".to_string())
+}
+
+/// Editors are configured as a command line (`code -w`), so split it.
+fn editor_argv(editor: &str) -> Vec<String> {
+    editor.split_whitespace().map(str::to_string).collect()
 }
 
 fn run_init(cli: &Cli, force: bool) -> Result<ExitCode> {
@@ -686,6 +791,75 @@ all = ["@pve", "@prox"]
             Some(Command::Ping { timeout, .. }) => assert_eq!(timeout, 3),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn config_prints_the_path_then_the_file() {
+        let raw = "[defaults]\nconcurrency = 4\n\n[groups]\npve = [\"a\"]\n";
+        let lines = config_report(std::path::Path::new("/tmp/x/config.toml"), raw);
+        assert_eq!(lines[0], "/tmp/x/config.toml");
+        assert_eq!(lines[1], "[defaults]");
+        assert!(
+            lines.iter().any(|line| line.contains("pve = [\"a\"]")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn editor_follows_visual_then_editor_then_vi() {
+        let set = |values: Vec<(&'static str, &'static str)>| {
+            move |key: &str| {
+                values
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| std::ffi::OsString::from(*value))
+            }
+        };
+        assert_eq!(
+            editor_command(set(vec![("VISUAL", "code -w"), ("EDITOR", "nano")])).as_deref(),
+            Some("code -w"),
+            "VISUAL wins"
+        );
+        assert_eq!(
+            editor_command(set(vec![("EDITOR", "nano")])).as_deref(),
+            Some("nano")
+        );
+        assert_eq!(
+            editor_command(set(vec![])).as_deref(),
+            Some("vi"),
+            "fallback"
+        );
+        assert_eq!(
+            editor_command(set(vec![("EDITOR", "   ")])).as_deref(),
+            Some("vi"),
+            "a blank variable is ignored"
+        );
+    }
+
+    #[test]
+    fn editor_command_lines_split_into_argv() {
+        assert_eq!(editor_argv("code -w"), vec!["code", "-w"]);
+        assert_eq!(editor_argv("  nano "), vec!["nano"]);
+        assert_eq!(
+            editor_argv("sh -c 'echo hi'"),
+            vec!["sh", "-c", "'echo", "hi'"]
+        );
+    }
+
+    #[test]
+    fn config_and_config_edit_parse() {
+        assert!(matches!(
+            cli(&["dse", "config"]).command,
+            Some(Command::Config { edit: false })
+        ));
+        assert!(matches!(
+            cli(&["dse", "config", "-e"]).command,
+            Some(Command::Config { edit: true })
+        ));
+        assert!(matches!(
+            cli(&["dse", "config", "--edit"]).command,
+            Some(Command::Config { edit: true })
+        ));
     }
 
     #[test]
