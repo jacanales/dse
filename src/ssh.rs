@@ -1,6 +1,6 @@
 //! Thin layer over the system OpenSSH client (S5).
 //!
-//! dsh never stores connection settings: it shells out to `ssh`, so keys,
+//! dse never stores connection settings: it shells out to `ssh`, so keys,
 //! agent, `ProxyJump`, `Include`, aliases and `known_hosts` behave exactly as
 //! they already do in the user's terminal. Resolution is only used to *show*
 //! the effective target, never to bypass the client.
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn resolve_failure_surfaces_stderr() {
-        let dir = std::env::temp_dir().join(format!("dsh-ssh-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dse-ssh-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let stub = dir.join("ssh-fail");
         std::fs::write(&stub, "#!/bin/sh\necho 'no such host' >&2\nexit 255\n")

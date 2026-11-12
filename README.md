@@ -1,15 +1,15 @@
-# dsh
+# dse
 
 Fan one command out to a group of hosts — over the SSH config you already have.
 
-dsh is a terminal multiplexing shell for fleets: pick a group of machines, type a
+dse is a terminal multiplexing shell for fleets: pick a group of machines, type a
 command in the embedded prompt, and watch every host report its own progress,
 output and exit code. It borrows the ideas that made `pssh` and `pdsh` useful
 (parallel execution, per-host output, exit-code summary) and adds a live,
 modern terminal interface.
 
 ```text
-╭ dsh  pve · 2 hosts ──────────────────────────────────────────────────────────────────────────╮
+╭ dse  pve · 2 hosts ──────────────────────────────────────────────────────────────────────────╮
 │████████████████████ 2/2  1 ok · 1 failed · 0 running · 0 queued    0.0s  ████████████████████│
 ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭ type a command and press Enter to fan it out ────────────────────────────────────────────────╮
@@ -31,7 +31,7 @@ modern terminal interface.
 
 ## Why another one
 
-- **No connection settings inside dsh.** Hosts are plain OpenSSH targets, so
+- **No connection settings inside dse.** Hosts are plain OpenSSH targets, so
   `~/.ssh/config`, keys, agent, `ProxyJump`, `Include` and `known_hosts` behave
   exactly as they already do in your shell. A group is just a list of host names.
 - **Rust async fan-out.** Every host runs concurrently under a bounded
@@ -44,23 +44,24 @@ modern terminal interface.
 ## Install
 
 ```sh
-cargo build --release          # ./target/release/dsh
-cargo install --path .         # ~/.cargo/bin/dsh
+cargo build --release          # ./target/release/dse
+cargo install --path .         # ~/.cargo/bin/dse
 ```
 
-> Note: `~/.cargo/bin` usually precedes Homebrew, so installing here shadows the
-> Debian `dsh` distributed by Homebrew (`/opt/homebrew/bin/dsh`). Rename the
-> binary in `Cargo.toml` if both must coexist.
+The name is **dse** — *Distributed Shell Executor* — so nothing collides with the
+classic Debian `dsh` (still installed by Homebrew as `/opt/homebrew/bin/dsh`).
 
 ## Configure
 
 ```sh
-dsh init        # writes a starter ~/.config/dsh/config.toml (refuses to overwrite: --force)
+dse init        # writes a starter ~/.config/dse/config.toml (refuses to overwrite: --force)
 ```
 
-`~/.config/dsh/config.toml` is resolved as `$DSH_CONFIG`, else
-`$XDG_CONFIG_HOME/dsh/config.toml`, else `$HOME/.config/dsh/config.toml`
-(override per run with `--config PATH`):
+`~/.config/dse/config.toml` is resolved as `$DSE_CONFIG`, else
+`$XDG_CONFIG_HOME/dse/config.toml`, else `$HOME/.config/dse/config.toml`
+(override per run with `--config PATH`). If only the pre-rename file exists
+(`$DSH_CONFIG`, `~/.config/dsh/config.toml`), it is used as a fallback and
+`dse groups` shows which file was read:
 
 ```toml
 [defaults]
@@ -81,22 +82,22 @@ Key-based ssh must already work for those host names.
 ## Use
 
 ```sh
-dsh init                     # write a starter config and print its path
-dsh                          # terminal on every configured group (Tab cycles)
-dsh -g pve                   # terminal on one group
-dsh run -g pve apt update    # one-shot run, prefixed streaming output
-dsh run -H 10.0.0.9,10.0.0.10 uptime
-dsh groups                   # groups and their host counts
-dsh hosts -g pve             # effective user@host:port resolved through ssh -G
-dsh ping -g pve              # does every host answer over ssh?
-dsh ping pve00.jacd.local    # or a single machine
-dsh ping pve dead01          # hosts and group names can be mixed
+dse init                     # write a starter config and print its path
+dse                          # terminal on every configured group (Tab cycles)
+dse -g pve                   # terminal on one group
+dse run -g pve apt update    # one-shot run, prefixed streaming output
+dse run -H 10.0.0.9,10.0.0.10 uptime
+dse groups                   # groups and their host counts
+dse hosts -g pve             # effective user@host:port resolved through ssh -G
+dse ping -g pve              # does every host answer over ssh?
+dse ping pve00.jacd.local    # or a single machine
+dse ping pve dead01          # hosts and group names can be mixed
 ```
 
-Exit codes of `dsh run` and `dsh ping` are `0` only when every host succeeded
+Exit codes of `dse run` and `dse ping` are `0` only when every host succeeded
 (or answered), `1` otherwise.
 
-### Checking a fleet: `dsh ping`
+### Checking a fleet: `dse ping`
 
 ```text
 ✔ pve00.jacd.local 613 ms
@@ -106,7 +107,7 @@ Exit codes of `dsh run` and `dsh ping` are `0` only when every host succeeded
 ✖ 2/4 reachable · 2 unreachable
 ```
 
-A probe is a full ssh session running `true`, so it validates what dsh actually
+A probe is a full ssh session running `true`, so it validates what dse actually
 needs: DNS, TCP, host key, key/agent authentication and the remote shell. The
 latency is the whole round trip. `--timeout SECS` (default 10, `0` waits forever)
 bounds a dead host; on expiry the ssh child is killed and reported as a timeout.
@@ -134,7 +135,7 @@ you were typing.
 
 ### Command history
 
-`dsh` keeps the last 50 commands of the session, merging consecutive repeats
+`dse` keeps the last 50 commands of the session, merging consecutive repeats
 (zsh's `HIST_IGNORE_DUPS`): running `apt update` three times leaves one entry.
 Walking with `↑` and back down restores the unfinished line you had typed.
 History lives in memory for the session; it is not written to disk.
@@ -177,7 +178,7 @@ useful when changing the layout.
 
 - Native ssh multiplexing (`ControlMaster`) or an in-process client to cut
   connection latency on big groups.
-- Per-host timeout and retry policies for `dsh run` and the TUI (the engine
+- Per-host timeout and retry policies for `dse run` and the TUI (the engine
   already bounds each host; only `ping` exposes it today).
 - `sudo` prompts, remote file copy, and ordered/rolling execution.
 - Filters over groups (`tag:proxmox`, ssh-config wildcards) instead of flat lists.

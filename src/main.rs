@@ -15,7 +15,7 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(err) => {
-            eprintln!("dsh: cannot start the async runtime: {err}");
+            eprintln!("dse: cannot start the async runtime: {err}");
             return ExitCode::FAILURE;
         }
     };

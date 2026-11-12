@@ -51,7 +51,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         .unwrap_or_else(|| "no target".to_string());
     let title = Line::from(vec![
         Span::styled(
-            " dsh ",
+            " dse ",
             Style::new()
                 .fg(Color::Black)
                 .bg(ACCENT)
@@ -423,7 +423,7 @@ mod tests {
         let app = app_with_progress();
         let screen = rendered(&app);
         for expected in [
-            "dsh",
+            "dse",
             "pve",
             "pve00.jacd.local",
             "pve01.jacd.local",

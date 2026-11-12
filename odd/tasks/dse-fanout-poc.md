@@ -1,7 +1,10 @@
-# dsh — fan-out shell PoC
+# dse — fan-out shell PoC
 
 Rust TUI that fans one command out to a group of hosts, borrowing connection settings from the user's existing OpenSSH configuration.
 PoC scope: runnable end-to-end (config, fan-out engine, live TUI), not polished.
+
+> Naming: the project shipped as `dsh` and was renamed to `dse` (Distributed Shell
+> Executor) in L15. Earlier log entries keep the old name verbatim as history.
 
 ## Specs
 
@@ -20,28 +23,32 @@ PoC scope: runnable end-to-end (config, fan-out engine, live TUI), not polished.
 ### PoC decisions (S5, S6)
 
 - Connection layer = the system `ssh` client, so `~/.ssh/config`, keys, agent, `ProxyJump`, `KnownHosts` all apply with zero reimplementation. Effective settings are read back with `ssh -G <target>` for display only.
-- Groups live in `~/.config/dsh/config.toml` (`[groups]`), one flat list per group; `@group` entries nest groups. No host credentials in that file.
-- Binary name `dsh` (repo/project name). Installing it puts `dsh` ahead of the Debian `dsh` (`/opt/homebrew/bin/dsh`) in PATH; rename the `[[bin]]` if both must coexist.
+- Groups live in `~/.config/dse/config.toml` (`[groups]`), one flat list per group; `@group` entries nest groups. No host credentials in that file. The pre-rename path (`~/.config/dsh/config.toml`, `$DSH_CONFIG`) is read as a fallback while it is the only file that exists.
+- Binary and crate name `dse` — Distributed Shell Executor (L15). It no longer collides with the Debian `dsh` installed by Homebrew.
 
 ## Tasks
 
 - [x] **T1** — *S5* — Config + target resolution + SSH resolution (`src/config.rs`, `src/ssh.rs`), with tests. Commit: `f15b251`.
 - [x] **T2** — *S2, S4, S7* — Fan-out engine: concurrent bounded execution, per-host stdout/stderr/exit events, summary + exit code (`src/exec.rs`), tests against a stub ssh. Commit: `f15b251`.
 - [x] **T3** — *S3* — TUI: prompt line, per-host live status, progress gauge, detail view (`src/app.rs`, `src/ui.rs`, `src/tui.rs`). Commit: `f15b251`.
-- [x] **T4** — *S1, S2, S6* — CLI wiring: `dsh` (TUI), `dsh run`, `dsh groups`, `dsh hosts` (`src/main.rs`, `src/cli.rs`). Commit: `f15b251`.
+- [x] **T4** — *S1, S2, S6* — CLI wiring: `dse` (TUI), `dse run`, `dse groups`, `dse hosts` (`src/main.rs`, `src/cli.rs`). Commit: `f15b251`.
 - [x] **T5** — *S6* — README with config example and keybindings; `cargo fmt`, `cargo clippy -D warnings`, `cargo test`. Commit: `f86fd8c`.
 
 - [x] **T8** — *S10, S11* (user request L12) — terminal-style history: `↑`/`↓`
   walk it (restoring the unfinished line), `Ctrl-R` opens a zsh-style reverse
   search over it; the prompt editor gains a `Search` focus, host selection moves
   to `Ctrl-P`/`Ctrl-N`. Commit: `feat(tui): zsh-style command history`.
-- [x] **T7** — *S8, S9* (user request L10) — `dsh ping`: a bounded ssh probe per
+- [x] **T7** — *S8, S9* (user request L10) — `dse ping`: a bounded ssh probe per
   host (hosts, groups or a mix), latency per host, reason on failure. Engine
   gains an optional per-host timeout and `HostState::TimedOut`. Commit:
-  `feat(cli): add dsh ping`.
-- [x] **T6** — *S6* (user report L7) — `dsh init` writes a starter config and the
-  "config not found" error points at it; `dsh groups` reports the file actually
-  used. Commit: `feat(cli): add dsh init`.
+  `7382c99`.
+- [x] **T6** — *S6* (user report L7) — `dse init` writes a starter config and the
+  "config not found" error points at it; `dse groups` reports the file actually
+  used. Commit: `c239cbc`.
+- [x] **T9** — *S12* (user request L15) — rename to `dse`: crate, binary, config
+  path `~/.config/dse/config.toml`, `$DSE_CONFIG`, docs, hints and messages, with
+  the pre-rename config path kept as a read-only fallback. Commit:
+  `refactor: rename dsh to dse`.
 
 T1–T4 landed in one commit: a greenfield binary needs every module declared in
 `main.rs` to compile, so slicing per task would have produced non-building
@@ -122,3 +129,15 @@ Para conectar a las máquinas, en lugar de configurar el modo de conexión en la
 - **L6** (closed by L11) — Real-machine verification done: `dsh ping` proves ssh
   connectivity to the whole `pve` group. A successful `dsh run` on the group is
   still the user's own next step.
+- **L15** (user request, verbatim) — "No quiero llamar a esta app "dsh", porque se
+  puede confundir con la dsh original. Me puedes proponer nombres cortos, pero
+  consentido?" Follow-ups asked for three-letter names and then for initialisms of
+  three words; the user chose **dse** (Distributed Shell Executor) from
+  `dse` / `mos` / `res` / `fos`. Every candidate was checked as free in PATH (and
+  the earlier shortlist in crates.io).
+- **L16** (evidence, S12) — Rename applied: crate/binary `dse`, config path
+  `~/.config/dse/config.toml`, `$DSE_CONFIG`, all help/hints/messages/docs. The
+  pre-rename config (`$DSH_CONFIG`, `~/.config/dsh/config.toml`) is still read when
+  the new path is absent (pinned by `legacy_paths_keep_the_old_location_working`),
+  and `dse groups` prints which file it used. Suite, clippy and fmt green.
+  The repository directory is still `dsh/`; renaming the folder is the user's call.

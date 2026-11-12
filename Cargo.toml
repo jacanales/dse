@@ -1,8 +1,8 @@
 [package]
-name = "dsh"
+name = "dse"
 version = "0.1.0"
 edition = "2024"
-description = "Modern fan-out shell for groups of hosts over your existing SSH config"
+description = "Distributed Shell Executor: fan one command out to host groups over your existing SSH config"
 license = "MIT"
 
 [dependencies]

@@ -11,7 +11,7 @@ use serde::Deserialize;
 pub const DEFAULT_CONCURRENCY: usize = 16;
 pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 5;
 
-/// Connection knobs that dsh forwards to the system `ssh` client.
+/// Connection knobs that dse forwards to the system `ssh` client.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Defaults {
@@ -34,7 +34,7 @@ impl Default for Defaults {
     }
 }
 
-/// `~/.config/dsh/config.toml`.
+/// `~/.config/dse/config.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -57,7 +57,7 @@ pub enum TargetSpec {
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error(
-        "no config file found; looked for {0} — run `dsh init` to create a template, or pass --hosts"
+        "no config file found; looked for {0} — run `dse init` to create a template, or pass --hosts"
     )]
     NotFound(String),
     #[error("{0} already exists; use --force to overwrite it")]
@@ -93,17 +93,17 @@ pub enum ConfigError {
 }
 
 impl Config {
-    /// Starting point written by `dsh init`; kept valid by tests.
+    /// Starting point written by `dse init`; kept valid by tests.
     pub const TEMPLATE: &'static str = r#"
-# dsh — fan one command out to a group of hosts.
+# dse — fan one command out to a group of hosts.
 #
 # Hosts are plain OpenSSH targets, so ~/.ssh/config, keys, agent and ProxyJump
 # already apply. Key-based ssh must work for these names as it does today.
 #
-#   dsh                  open the terminal on every group (Tab cycles groups)
-#   dsh -g pve           open it on one group
-#   dsh run -g pve apt update
-#   dsh hosts -g pve     show the effective user@host:port per host
+#   dse                  open the terminal on every group (Tab cycles groups)
+#   dse -g pve           open it on one group
+#   dse run -g pve apt update
+#   dse hosts -g pve     show the effective user@host:port per host
 
 [defaults]
 concurrency = 16                 # simultaneous ssh sessions
@@ -133,28 +133,72 @@ cluster = ["@pve", "@prox"]
     }
 
     /// Resolve where the config lives, in precedence order:
-    /// `$DSH_CONFIG`, `$XDG_CONFIG_HOME/dsh/config.toml`, `$HOME/.config/dsh/config.toml`.
+    /// `$DSE_CONFIG`, `$XDG_CONFIG_HOME/dse/config.toml`, `$HOME/.config/dse/config.toml`.
     pub fn path() -> Result<PathBuf, ConfigError> {
-        if let Some(explicit) = std::env::var_os("DSH_CONFIG") {
+        if let Some(explicit) = std::env::var_os("DSE_CONFIG") {
             return Ok(PathBuf::from(explicit));
         }
         if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-            return Ok(PathBuf::from(xdg).join("dsh").join("config.toml"));
+            return Ok(PathBuf::from(xdg).join("dse").join("config.toml"));
         }
         if let Some(home) = std::env::var_os("HOME") {
             return Ok(PathBuf::from(home)
                 .join(".config")
-                .join("dsh")
+                .join("dse")
                 .join("config.toml"));
         }
         Err(ConfigError::NotFound(
-            "$HOME/.config/dsh/config.toml".to_string(),
+            "$HOME/.config/dse/config.toml".to_string(),
         ))
     }
 
+    /// Load the config, falling back to the paths used before the rename so an
+    /// existing setup keeps working until it is moved by hand.
     pub fn load() -> Result<(Self, PathBuf), ConfigError> {
         let path = Self::path()?;
-        Ok((Self::load_from(&path)?, path))
+        if path.exists() {
+            return Ok((Self::load_from(&path)?, path));
+        }
+        for legacy in Self::legacy_paths() {
+            if legacy.exists() {
+                return Ok((Self::load_from(&legacy)?, legacy));
+            }
+        }
+        Err(ConfigError::NotFound(path.display().to_string()))
+    }
+
+    /// Paths from the previous name ("dsh"), only consulted when the current one
+    /// does not exist: `$DSH_CONFIG`, `$HOME/.config/dsh/config.toml`,
+    /// `$XDG_CONFIG_HOME/dsh/config.toml`.
+    fn legacy_paths() -> Vec<PathBuf> {
+        Self::legacy_paths_from(
+            std::env::var_os("HOME").as_deref(),
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+            std::env::var_os("DSH_CONFIG").as_deref(),
+        )
+    }
+
+    fn legacy_paths_from(
+        home: Option<&std::ffi::OsStr>,
+        xdg: Option<&std::ffi::OsStr>,
+        explicit: Option<&std::ffi::OsStr>,
+    ) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if let Some(explicit) = explicit {
+            paths.push(PathBuf::from(explicit));
+        }
+        if let Some(home) = home {
+            paths.push(
+                PathBuf::from(home)
+                    .join(".config")
+                    .join("dsh")
+                    .join("config.toml"),
+            );
+        }
+        if let Some(xdg) = xdg {
+            paths.push(PathBuf::from(xdg).join("dsh").join("config.toml"));
+        }
+        paths
     }
 
     /// Write the template to `path`, creating parent directories. Returns the
@@ -292,6 +336,29 @@ cluster = ["@pve", "@prox", "pve00.jacd.local"]
     }
 
     #[test]
+    fn legacy_paths_keep_the_old_location_working() {
+        use std::ffi::OsStr;
+        let paths = Config::legacy_paths_from(
+            Some(OsStr::new("/home/u")),
+            Some(OsStr::new("/xdg")),
+            Some(OsStr::new("/explicit/dsh.toml")),
+        );
+        let shown: Vec<String> = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                "/explicit/dsh.toml",
+                "/home/u/.config/dsh/config.toml",
+                "/xdg/dsh/config.toml"
+            ]
+        );
+        assert!(Config::legacy_paths_from(None, None, None).is_empty());
+    }
+
+    #[test]
     fn template_is_a_valid_config_with_an_example_group() {
         let config = Config::parse(Config::TEMPLATE).expect("the shipped template parses");
         let hosts = config
@@ -304,7 +371,7 @@ cluster = ["@pve", "@prox", "pve00.jacd.local"]
     #[test]
     fn init_writes_the_template_and_refuses_to_clobber() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("nested").join("dsh").join("config.toml");
+        let path = dir.path().join("nested").join("dse").join("config.toml");
 
         let written = Config::write_template(&path, false).expect("creates parent dirs too");
         assert_eq!(written, path);
@@ -332,7 +399,7 @@ cluster = ["@pve", "@prox", "pve00.jacd.local"]
     #[test]
     fn missing_config_points_at_the_init_command() {
         let err = ConfigError::NotFound("/tmp/nowhere/config.toml".to_string()).to_string();
-        assert!(err.contains("dsh init"), "{err}");
+        assert!(err.contains("dse init"), "{err}");
     }
 
     #[test]

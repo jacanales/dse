@@ -29,7 +29,7 @@ pub enum HostState {
     Succeeded,
     /// The remote command exited with this code (None when killed by a signal).
     Failed(Option<i32>),
-    /// dsh could not even start or finish the ssh process.
+    /// dse could not even start or finish the ssh process.
     Errored(String),
     /// The host did not answer within the configured timeout; the child was killed.
     TimedOut(Duration),

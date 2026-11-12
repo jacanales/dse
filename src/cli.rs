@@ -15,13 +15,13 @@ use crate::exec::{HostState, RunEvent, RunSpec, RunSummary, Stream, spawn_run};
 use crate::ssh::{self, SshSettings};
 use crate::tui;
 
-/// Default per-host limit for `dsh ping`: long enough for a slow link, short
+/// Default per-host limit for `dse ping`: long enough for a slow link, short
 /// enough that a dead host does not stall the report.
 const DEFAULT_PING_TIMEOUT_SECS: u64 = 10;
 
 const AFTER_HELP: &str = r#"Hosts are plain ssh targets, so ~/.ssh/config, keys, agent and ProxyJump all apply.
 
-Config: ~/.config/dsh/config.toml (override with --config or $DSH_CONFIG)
+Config: ~/.config/dse/config.toml (override with --config or $DSE_CONFIG)
 
   [defaults]
   concurrency = 16
@@ -32,17 +32,17 @@ Config: ~/.config/dsh/config.toml (override with --config or $DSH_CONFIG)
   all  = ["@pve", "@prox"]
 
 Examples:
-  dsh init                     write a starter config.toml
-  dsh                          open the fan-out terminal on every group
-  dsh -g pve                   open the terminal on the pve group
-  dsh run -g pve apt update    run once and stream prefixed output
-  dsh hosts -g pve             show the effective ssh endpoint per host
-  dsh ping -g pve              check every host answers over ssh
-  dsh ping pve00.jacd.local    the same, for a single machine
+  dse init                     write a starter config.toml
+  dse                          open the fan-out terminal on every group
+  dse -g pve                   open the terminal on the pve group
+  dse run -g pve apt update    run once and stream prefixed output
+  dse hosts -g pve             show the effective ssh endpoint per host
+  dse ping -g pve              check every host answers over ssh
+  dse ping pve00.jacd.local    the same, for a single machine
 "#;
 
 #[derive(Debug, Parser)]
-#[command(name = "dsh", version, about = "Fan one command out to a group of hosts over your existing SSH config", after_help = AFTER_HELP)]
+#[command(name = "dse", version, about = "Fan one command out to a group of hosts over your existing SSH config", after_help = AFTER_HELP)]
 struct Cli {
     /// Configured group to target (repeatable)
     #[arg(short = 'g', long = "group", value_name = "NAME", global = true)]
@@ -109,7 +109,7 @@ pub async fn run() -> ExitCode {
     match run_inner().await {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("dsh: {err:#}");
+            eprintln!("dse: {err:#}");
             ExitCode::FAILURE
         }
     }
@@ -200,7 +200,7 @@ fn run_init(cli: &Cli, force: bool) -> Result<ExitCode> {
     };
     let written = Config::write_template(&path, force).context("cannot write config")?;
     println!("wrote {}", written.display());
-    println!("edit [groups] with your hosts, then run `dsh`");
+    println!("edit [groups] with your hosts, then run `dse`");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -275,7 +275,7 @@ fn build_targets(config: &Config, cli: &Cli) -> Result<Vec<Target>> {
             }
             if targets.is_empty() {
                 bail!(
-                    "no hosts selected: configure groups in ~/.config/dsh/config.toml or pass --hosts"
+                    "no hosts selected: configure groups in ~/.config/dse/config.toml or pass --hosts"
                 );
             }
         }
@@ -303,7 +303,7 @@ fn parse_host_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// Render `dsh groups` output; separated from stdout so it can be asserted.
+/// Render `dse groups` output; separated from stdout so it can be asserted.
 fn group_report(config: &Config, path: &std::path::Path) -> Vec<String> {
     let mut lines = vec![format!("config  {}", path.display())];
     if config.groups.is_empty() {
@@ -386,22 +386,22 @@ fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
 }
 
-/// One host of a `dsh ping` report.
+/// One host of a `dse ping` report.
 struct PingRow {
     host: String,
     state: HostState,
     elapsed_ms: u128,
 }
 
-/// `dsh ping` accepts either explicit hosts or configured group names, so
-/// `dsh ping pve` and `dsh ping pve00.jacd.local` both work.
+/// `dse ping` accepts either explicit hosts or configured group names, so
+/// `dse ping pve` and `dse ping pve00.jacd.local` both work.
 fn ping_targets(config: &Config, cli: &Cli) -> Result<Vec<String>> {
     let Some(Command::Ping { targets, .. }) = &cli.command else {
         bail!("internal error: ping_targets called for another command");
     };
     if targets.is_empty() {
         if spec_for(cli).is_none() {
-            bail!("select a host or group to ping, e.g. `dsh ping pve` or `dsh ping -g pve`");
+            bail!("select a host or group to ping, e.g. `dse ping pve` or `dse ping -g pve`");
         }
         return resolve(config, cli);
     }
@@ -586,7 +586,7 @@ all = ["@pve", "@prox"]
     fn ping_accepts_hosts_and_group_names_positionally() {
         let config = config();
         let spec =
-            ping_targets(&config, &cli(&["dsh", "ping", "pve", "10.0.0.5"])).expect("resolves");
+            ping_targets(&config, &cli(&["dse", "ping", "pve", "10.0.0.5"])).expect("resolves");
         assert_eq!(
             spec,
             vec!["pve00.jacd.local", "pve01.jacd.local", "10.0.0.5"],
@@ -594,17 +594,17 @@ all = ["@pve", "@prox"]
         );
 
         let spec =
-            ping_targets(&config, &cli(&["dsh", "ping", "pve00.jacd.local"])).expect("resolves");
+            ping_targets(&config, &cli(&["dse", "ping", "pve00.jacd.local"])).expect("resolves");
         assert_eq!(spec, vec!["pve00.jacd.local"]);
 
-        let spec = ping_targets(&config, &cli(&["dsh", "ping", "-g", "prox"])).expect("resolves");
+        let spec = ping_targets(&config, &cli(&["dse", "ping", "-g", "prox"])).expect("resolves");
         assert_eq!(
             spec,
             vec!["prox00.jacd.local"],
             "without positional targets the -g/-H flags apply"
         );
 
-        assert!(ping_targets(&config, &cli(&["dsh", "ping"])).is_err());
+        assert!(ping_targets(&config, &cli(&["dse", "ping"])).is_err());
     }
 
     #[test]
@@ -639,7 +639,7 @@ all = ["@pve", "@prox"]
 
     #[test]
     fn ping_parses_targets_and_a_timeout() {
-        let plain = cli(&["dsh", "ping"]);
+        let plain = cli(&["dse", "ping"]);
         match plain.command {
             Some(Command::Ping {
                 ref targets,
@@ -650,7 +650,7 @@ all = ["@pve", "@prox"]
             }
             other => panic!("unexpected command: {other:?}"),
         }
-        let tuned = cli(&["dsh", "ping", "-H", "pve00.jacd.local", "--timeout", "3"]);
+        let tuned = cli(&["dse", "ping", "-H", "pve00.jacd.local", "--timeout", "3"]);
         match tuned.command {
             Some(Command::Ping { timeout, .. }) => assert_eq!(timeout, 3),
             other => panic!("unexpected command: {other:?}"),
@@ -678,21 +678,21 @@ all = ["@pve", "@prox"]
 
     #[test]
     fn init_takes_an_optional_force_flag_and_reuses_config_path() {
-        let plain = cli(&["dsh", "init"]);
+        let plain = cli(&["dse", "init"]);
         assert!(matches!(
             plain.command,
             Some(Command::Init { force: false })
         ));
         assert!(plain.config.is_none());
 
-        let forced = cli(&["dsh", "init", "--force", "--config", ".demo/dsh.toml"]);
+        let forced = cli(&["dse", "init", "--force", "--config", ".demo/dse.toml"]);
         assert!(matches!(
             forced.command,
             Some(Command::Init { force: true })
         ));
         assert_eq!(
             forced.config.as_deref(),
-            Some(std::path::Path::new(".demo/dsh.toml"))
+            Some(std::path::Path::new(".demo/dse.toml"))
         );
     }
 
@@ -705,27 +705,27 @@ all = ["@pve", "@prox"]
     #[test]
     fn selection_precedence_is_all_then_hosts_then_groups() {
         assert_eq!(
-            spec_for(&cli(&["dsh", "-a", "-g", "pve"])),
+            spec_for(&cli(&["dse", "-a", "-g", "pve"])),
             Some(TargetSpec::All)
         );
         assert_eq!(
-            spec_for(&cli(&["dsh", "-H", "10.0.0.1,10.0.0.2", "-g", "pve"])),
+            spec_for(&cli(&["dse", "-H", "10.0.0.1,10.0.0.2", "-g", "pve"])),
             Some(TargetSpec::Hosts(vec![
                 "10.0.0.1".into(),
                 "10.0.0.2".into()
             ]))
         );
         assert_eq!(
-            spec_for(&cli(&["dsh", "-g", "pve", "-g", "prox"])),
+            spec_for(&cli(&["dse", "-g", "pve", "-g", "prox"])),
             Some(TargetSpec::Groups(vec!["pve".into(), "prox".into()]))
         );
-        assert_eq!(spec_for(&cli(&["dsh"])), None);
+        assert_eq!(spec_for(&cli(&["dse"])), None);
     }
 
     #[test]
     fn tui_targets_cover_every_group_by_default() {
         let config = config();
-        let targets = build_targets(&config, &cli(&["dsh"])).expect("targets");
+        let targets = build_targets(&config, &cli(&["dse"])).expect("targets");
         let labels: Vec<&str> = targets.iter().map(|target| target.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -742,7 +742,7 @@ all = ["@pve", "@prox"]
     #[test]
     fn tui_targets_follow_an_explicit_selection() {
         let config = config();
-        let targets = build_targets(&config, &cli(&["dsh", "-g", "prox"])).expect("targets");
+        let targets = build_targets(&config, &cli(&["dse", "-g", "prox"])).expect("targets");
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].label, "prox");
         assert_eq!(targets[0].hosts, vec!["prox00.jacd.local"]);
@@ -751,7 +751,7 @@ all = ["@pve", "@prox"]
     #[test]
     fn unknown_group_is_an_error_for_the_tui() {
         let config = config();
-        let err = build_targets(&config, &cli(&["dsh", "-g", "nope"])).expect_err("fails");
+        let err = build_targets(&config, &cli(&["dse", "-g", "nope"])).expect_err("fails");
         assert!(err.to_string().contains("cannot resolve target"), "{err:#}");
     }
 
@@ -759,14 +759,14 @@ all = ["@pve", "@prox"]
     fn concurrency_falls_back_to_config() {
         let config = config();
         assert_eq!(
-            cli(&["dsh"])
+            cli(&["dse"])
                 .concurrency
                 .unwrap_or(config.defaults.concurrency)
                 .max(1),
             4
         );
         assert_eq!(
-            cli(&["dsh", "-c", "0"])
+            cli(&["dse", "-c", "0"])
                 .concurrency
                 .unwrap_or(config.defaults.concurrency)
                 .max(1),
@@ -776,7 +776,7 @@ all = ["@pve", "@prox"]
 
     #[test]
     fn host_list_does_not_need_a_config_file() {
-        let cli = cli(&["dsh", "-H", "10.0.0.1"]);
+        let cli = cli(&["dse", "-H", "10.0.0.1"]);
         assert!(cli.hosts.is_some());
         assert_eq!(
             resolve(&Config::default(), &cli).expect("resolves"),
