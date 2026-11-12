@@ -16,3 +16,6 @@ serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "signal"] }
 toml = "1.2.1"
+
+[dev-dependencies]
+tempfile = "3.27.0"

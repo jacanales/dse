@@ -2,3 +2,4 @@
 .worktrees
 *.log
 .DS_Store
+/.demo
